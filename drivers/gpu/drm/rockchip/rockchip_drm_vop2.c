@@ -2410,6 +2410,11 @@ static int vop2_create_crtcs(struct vop2 *vop2)
 		if (!vp->crtc.port)
 			continue;
 
+		if (!vp->primary_plane) {
+			drm_err(vop2->drm, "no primary plane for vp %d\n", i);
+			return -ENOENT;
+		}
+
 		plane = &vp->primary_plane->base;
 
 		ret = drm_crtc_init_with_planes(drm, &vp->crtc, plane, NULL,

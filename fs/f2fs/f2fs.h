@@ -3255,6 +3255,17 @@ static inline bool f2fs_need_compress_data(struct inode *inode)
 	return false;
 }
 
+static inline unsigned int addrs_per_page(struct inode *inode,
+							bool is_inode)
+{
+	unsigned int addrs = is_inode ? (CUR_ADDRS_PER_INODE(inode) -
+			get_inline_xattr_addrs(inode)) : DEF_ADDRS_PER_BLOCK;
+
+	if (f2fs_compressed_file(inode))
+		return ALIGN_DOWN(addrs, F2FS_I(inode)->i_cluster_size);
+	return addrs;
+}
+
 static inline unsigned int addrs_per_inode(struct inode *inode)
 {
 	unsigned int addrs = CUR_ADDRS_PER_INODE(inode) -

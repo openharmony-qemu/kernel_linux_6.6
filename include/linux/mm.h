@@ -2584,9 +2584,17 @@ static inline unsigned long get_mm_counter_sum(struct mm_struct *mm, int member)
 
 void mm_trace_rss_stat(struct mm_struct *mm, int member);
 
+#ifdef CONFIG_RSS_THRESHOLD
+void listen_rss_threshold(struct mm_struct *mm);
+#endif
+
 static inline void add_mm_counter(struct mm_struct *mm, int member, long value)
 {
 	percpu_counter_add(&mm->rss_stat[member], value);
+
+#ifdef CONFIG_RSS_THRESHOLD
+	listen_rss_threshold(mm);
+#endif
 
 	mm_trace_rss_stat(mm, member);
 }
@@ -2594,6 +2602,10 @@ static inline void add_mm_counter(struct mm_struct *mm, int member, long value)
 static inline void inc_mm_counter(struct mm_struct *mm, int member)
 {
 	percpu_counter_inc(&mm->rss_stat[member]);
+
+#ifdef CONFIG_RSS_THRESHOLD
+	listen_rss_threshold(mm);
+#endif
 
 	mm_trace_rss_stat(mm, member);
 }

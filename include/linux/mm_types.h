@@ -850,10 +850,11 @@ struct mm_struct {
 		int mm_lock_seq;
 #endif
 
-
 		unsigned long hiwater_rss; /* High-watermark of RSS usage */
 		unsigned long hiwater_vm;  /* High-water virtual memory usage */
-
+#ifdef CONFIG_RSS_THRESHOLD
+		unsigned long rss_threshold; /* A threshold monitor RSS */
+#endif
 		unsigned long total_vm;	   /* Total pages mapped */
 		unsigned long locked_vm;   /* Pages that have PG_mlocked set */
 		atomic64_t    pinned_vm;   /* Refcount permanently increased */

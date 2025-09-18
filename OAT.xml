@@ -24,8 +24,10 @@
             <policy name="projectPolicy" desc="">
 				<policyitem type="compatibility" name="GPL-1.0+" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="GPL-2.0+" path=".*" desc="linux kernel license"/>
+				<policyitem type="compatibility" name="GPL-2.0" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="SPDX:LGPL-2.1" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="SPDX:GPL-2.0+" path=".*" desc="linux kernel license"/>
+				<policyitem type="compatibility" name="SPDX:GPL-2.0" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="GPLStyleLicense" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="Linux-OpenIB" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="SPDX:Zlib" path=".*" desc="linux kernel license"/>
@@ -38,7 +40,9 @@
 				<policyitem type="compatibility" name="MPL-1.1" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="GCC-exception-2.0" path=".*" desc="linux kernel license"/>
 				<policyitem type="compatibility" name="GPL-COMPATIBLE-ID" path=".*" desc="linux kernel license"/>
+                <policyitem type="copyright" name="Huawei Technologies Co., Ltd." path=".*" desc="huawei copyright"/>
 				<policyitem type="copyright" name="Huawei Device Co., Ltd." path="fs/hmdfs/.*" desc="huawei copyright"/>
+				<policyitem type="license" name="SPDX:GPL-2.0" path=".*" rule="may" group="defaultGroup" filefilter="defaultPolicyFilter"/>
             </policy>
         </policylist>
         <filefilterlist>

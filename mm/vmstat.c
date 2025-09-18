@@ -1187,7 +1187,9 @@ const char * const vmstat_text[] = {
 #ifdef CONFIG_UNACCEPTED_MEMORY
 	"nr_unaccepted",
 #endif
-
+#ifdef CONFIG_PAGE_TRACING
+	"nr_skb_pages",
+#endif
 	/* enum numa_stat_item counters */
 #ifdef CONFIG_NUMA
 	"numa_hit",

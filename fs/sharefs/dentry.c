@@ -11,11 +11,24 @@
 
 #include "sharefs.h"
 
+
+static bool is_mountpoint(struct dentry *dentry)
+{
+	if (!dentry || !dentry->d_sb)
+		return false;
+	
+	return d_mountpoint(dentry);
+}
+
 /*
  * returns: 0: tell VFS to invalidate dentry in share directory
  */
 static int sharefs_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
+	if (is_mountpoint(dentry)) {
+		return 1;
+	}
+
 	return 0;
 }
 

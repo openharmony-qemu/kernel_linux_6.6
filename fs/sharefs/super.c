@@ -15,6 +15,7 @@ enum {
 	OPT_USER_ID,
 	OPT_OVERRIDE,
 	OPT_OVERRIDE_SUPPORT_DELETE,
+	OPT_SNIFFER,
 	OPT_ERR,
 };
 
@@ -22,6 +23,7 @@ static match_table_t sharefs_tokens = {
 	{ OPT_USER_ID, "user_id=%s" },
 	{ OPT_OVERRIDE, "override" },
 	{ OPT_OVERRIDE_SUPPORT_DELETE, "override_support_delete" },
+	{ OPT_SNIFFER, "sniffer" },
 	{ OPT_ERR, NULL }
 };
 
@@ -67,6 +69,9 @@ int sharefs_parse_options(struct sharefs_sb_info *sbi, const char *data)
 			break;
 		case OPT_OVERRIDE_SUPPORT_DELETE:
 			sbi->override_support_delete = true;
+			break;
+		case OPT_SNIFFER:
+			sbi->sniffer = true;
 			break;
 		default:
 			err = -EINVAL;

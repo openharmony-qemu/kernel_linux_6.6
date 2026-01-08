@@ -109,9 +109,15 @@ struct inode *sharefs_iget(struct super_block *sb, struct inode *lower_inode)
 
 	atomic64_inc(&inode->i_version);
 
+	struct sharefs_sb_info *sbi = SHAREFS_SB(sb);
+
 	/* use different set of inode ops for symlinks & directories */
-	if (S_ISDIR(lower_inode->i_mode))
-		inode->i_op = &sharefs_dir_iops;
+	if (sbi && S_ISDIR(lower_inode->i_mode))
+		if (sbi->override_support_delete) {
+			inode->i_op = &sharefs_dir_override_iops;
+		} else {
+			inode->i_op = &sharefs_dir_iops;
+		}
 	else if (S_ISLNK(lower_inode->i_mode))
 		inode->i_op = &sharefs_symlink_iops;
 	else
@@ -207,7 +213,6 @@ static struct dentry *__sharefs_lookup(struct dentry *dentry,
 	struct dentry *lower_dentry;
 	const char *name;
 	struct path lower_path;
-	struct qstr this;
 	struct dentry *ret_dentry = NULL;
 
 	/* must initialize dentry operations */
@@ -244,29 +249,14 @@ static struct dentry *__sharefs_lookup(struct dentry *dentry,
 	if (err && err != -ENOENT)
 		goto out;
 
-	/* instantiate a new negative dentry */
-	this.name = name;
-	this.len = strlen(name);
-	this.hash = full_name_hash(lower_dir_dentry, this.name, this.len);
-	lower_dentry = d_lookup(lower_dir_dentry, &this);
-	if (lower_dentry)
-		goto setup_lower;
-
-	lower_dentry = d_alloc(lower_dir_dentry, &this);
-	if (!lower_dentry) {
-		err = -ENOMEM;
+	lower_dentry = lookup_one_len_unlocked(name, lower_dir_dentry, dentry->d_name.len);
+	if (IS_ERR(lower_dentry)) {
+		err = PTR_ERR(lower_dentry);
+		sharefs_err("lookup_one_len_unlocked error:%d", err);
+		ret_dentry = lower_dentry;
 		goto out;
 	}
 
-	/*
-	 * Calling ->lookup instead of d_add will give the lower fs a chance
-	 * to allocate the d_fsdata field but will still instantiate and hash the
-	 * lower_dentry. Without this, sharefs could not stack on top of itself.
-	 */
-	d_inode(lower_dir_dentry)->i_op->lookup(d_inode(lower_dir_dentry),
-						lower_dentry, flags);
-
-setup_lower:
 	lower_path.dentry = lower_dentry;
 	lower_path.mnt = mntget(lower_dir_mnt);
 	sharefs_set_lower_path(dentry, &lower_path);
@@ -291,20 +281,8 @@ struct dentry *sharefs_lookup(struct inode *dir, struct dentry *dentry,
 	int err;
 	struct dentry *ret, *parent;
 	struct path lower_parent_path;
-#ifdef CONFIG_SHAREFS_SUPPORT_OVERRIDE
-	const struct cred *saved_cred = NULL;
-	__u16 permission;
-#endif
-
 	parent = dget_parent(dentry);
 	sharefs_get_lower_path(parent, &lower_parent_path);
-#ifdef CONFIG_SHAREFS_SUPPORT_OVERRIDE
-	saved_cred = sharefs_override_file_fsids(dir, &permission);
-	if (!saved_cred) {
-		ret = ERR_PTR(-ENOMEM);
-		goto out_err;
-	}
-#endif
 
 	/* allocate dentry private data.  We free it in ->d_release */
 	err = new_dentry_private_data(dentry);
@@ -328,10 +306,60 @@ struct dentry *sharefs_lookup(struct inode *dir, struct dentry *dentry,
 				sharefs_lower_inode(d_inode(parent)));
 	fixup_perm_from_level(d_inode(parent), dentry);
 out:
-#ifdef CONFIG_SHAREFS_SUPPORT_OVERRIDE
+	sharefs_put_lower_path(parent, &lower_parent_path);
+	dput(parent);
+	return ret;
+}
+
+struct dentry *sharefs_override_lookup(struct inode *dir, struct dentry *dentry,
+			     unsigned int flags)
+{
+	int err;
+	struct dentry *ret, *parent;
+	struct path lower_parent_path;
+	const struct cred *saved_cred = NULL;
+	__u16 permission;
+	__u16 next_permission;
+
+	parent = dget_parent(dentry);
+	sharefs_get_lower_path(parent, &lower_parent_path);
+	
+	next_permission = perm_get_next_level_override(SHAREFS_I(dir)->perm);
+	if (next_permission == SHAREFS_PERM_PACKAGE_OVERRIDE && SHAREFS_SB(dir->i_sb)->sniffer) {
+		printk("sharefs: package override enable\n");
+	}
+
+	saved_cred = sharefs_override_file_fsids(dir, &permission);
+	if (!saved_cred) {
+		ret = ERR_PTR(-ENOMEM);
+		goto out_err;
+	}
+
+	/* allocate dentry private data.  We free it in ->d_release */
+	err = new_dentry_private_data(dentry);
+	if (err) {
+		ret = ERR_PTR(err);
+		goto out;
+	}
+	ret = __sharefs_lookup(dentry, flags, &lower_parent_path);
+	if (IS_ERR(ret)) {
+		sharefs_err("sharefs_lookup error!");
+		goto out;
+	}
+
+	if (ret)
+		dentry = ret;
+	if (d_inode(dentry)) {
+		fsstack_copy_attr_times(d_inode(dentry),
+					sharefs_lower_inode(d_inode(dentry)));
+		SHAREFS_I(d_inode(dentry))->perm = next_permission;
+	}
+	/* update parent directory's atime */
+	fsstack_copy_attr_atime(d_inode(parent),
+				sharefs_lower_inode(d_inode(parent)));
+out:
 	sharefs_revert_fsids(saved_cred);
 out_err:
-#endif
 	sharefs_put_lower_path(parent, &lower_parent_path);
 	dput(parent);
 	return ret;

@@ -66,6 +66,7 @@ struct sharefs_sb_info {
 	unsigned int user_id;
 	bool override;
 	bool override_support_delete;
+	bool sniffer;
 };
 
 /* operations vectors defined in specific files */
@@ -73,6 +74,7 @@ extern const struct file_operations sharefs_main_fops;
 extern const struct file_operations sharefs_dir_fops;
 extern const struct inode_operations sharefs_main_iops;
 extern const struct inode_operations sharefs_dir_iops;
+extern const struct inode_operations sharefs_dir_override_iops;
 extern const struct inode_operations sharefs_symlink_iops;
 extern const struct super_operations sharefs_sops;
 extern const struct dentry_operations sharefs_dops;
@@ -84,6 +86,8 @@ extern void sharefs_destroy_dentry_cache(void);
 extern int new_dentry_private_data(struct dentry *dentry);
 extern void free_dentry_private_data(struct dentry *dentry);
 extern struct dentry *sharefs_lookup(struct inode *dir, struct dentry *dentry,
+				     unsigned int flags);
+extern struct dentry *sharefs_override_lookup(struct inode *dir, struct dentry *dentry,
 				     unsigned int flags);
 extern struct inode *sharefs_iget(struct super_block *sb,
 				  struct inode *lower_inode);

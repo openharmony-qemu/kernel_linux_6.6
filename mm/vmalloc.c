@@ -1745,11 +1745,14 @@ static bool __purge_vmap_area_lazy(unsigned long start, unsigned long end)
 
 	if (unlikely(list_empty(&local_purge_list)))
 		goto out;
+#define KASAN_RELEASE_BATCH_SIZE 32
+
 
 	start = min(start,
 		list_first_entry(&local_purge_list,
 			struct vmap_area, list)->va_start);
 
+	unsigned int batch_count = 0;
 	end = max(end,
 		list_last_entry(&local_purge_list,
 			struct vmap_area, list)->va_end);
@@ -4269,6 +4272,11 @@ err_free_shadow:
 			kasan_release_vmalloc(orig_start, orig_end,
 				va->va_start, va->va_end);
 		vas[area] = NULL;
+
+		if (need_resched() || (++batch_count >= KASAN_RELEASE_BATCH_SIZE)) {
+			cond_resched();
+			batch_count = 0;
+		}
 		kfree(vms[area]);
 	}
 	spin_unlock(&free_vmap_area_lock);

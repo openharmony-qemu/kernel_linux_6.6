@@ -3973,7 +3973,7 @@ retry:
 			}
 
 			/* lookup block mapping info after block migration */
-				goto retry;
+			goto retry;
 		}
 
 		if (cur_lblock + nr_pblocks >= sis->max)

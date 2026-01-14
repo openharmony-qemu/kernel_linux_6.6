@@ -1847,6 +1847,9 @@ int security_path_rename(const struct path *old_dir, struct dentry *old_dentry,
 int security_path_chmod(const struct path *path, umode_t mode);
 int security_path_chown(const struct path *path, kuid_t uid, kgid_t gid);
 int security_path_chroot(const struct path *path);
+#ifdef CONFIG_SECURITY_DEC
+int security_path_access(const struct path *path, int mask);
+#endif  /* CONFIG_SECURITY_DEC */
 #else	/* CONFIG_SECURITY_PATH */
 static inline int security_path_unlink(const struct path *dir, struct dentry *dentry)
 {

@@ -105,6 +105,9 @@ LSM_HOOK(int, 0, path_rename, const struct path *old_dir,
 LSM_HOOK(int, 0, path_chmod, const struct path *path, umode_t mode)
 LSM_HOOK(int, 0, path_chown, const struct path *path, kuid_t uid, kgid_t gid)
 LSM_HOOK(int, 0, path_chroot, const struct path *path)
+#ifdef CONFIG_SECURITY_DEC
+LSM_HOOK(int, 0, path_access, const struct path *path, int mode)
+#endif /* CONFIG_SECURITY_DEC */
 #endif /* CONFIG_SECURITY_PATH */
 
 /* Needed for inode based security check */

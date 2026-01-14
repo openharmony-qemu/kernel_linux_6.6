@@ -496,6 +496,12 @@ retry:
 			goto out_path_release;
 	}
 
+#ifdef CONFIG_SECURITY_DEC
+	res = security_path_access(&path, mode | MAY_ACCESS);
+	if (res)
+		goto out_path_release;
+#endif /* CONFIG_SECURITY_DEC */
+
 	res = inode_permission(mnt_idmap(path.mnt), inode, mode | MAY_ACCESS);
 	/* SuS v2 requires we report a read only fs too */
 	if (res || !(mode & S_IWOTH) || special_file(inode->i_mode))

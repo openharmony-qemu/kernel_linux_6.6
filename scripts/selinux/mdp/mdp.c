@@ -243,6 +243,9 @@ int main(int argc, char *argv[])
 #ifdef CONFIG_SECURITY_SELINUX
 	GENFSCON("selinuxfs", "/");
 #endif
+#ifdef CONFIG_SHARE_FS
+	GENFSCON("sharefs", "/");
+#endif
 #ifdef CONFIG_SYSFS
 	GENFSCON("sysfs", "/");
 #endif

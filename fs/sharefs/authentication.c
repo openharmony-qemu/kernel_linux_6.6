@@ -16,6 +16,13 @@ static inline __u16 perm_get_next_level(__u16 perm)
 		return SHAREFS_PERM_OTHER;
 }
 
+__u16 perm_get_next_level_override(__u16 perm)
+{
+	__u16 level = (perm & SHAREFS_PERM_MASK) + 1;
+
+	return level <= SHAREFS_PERM_OTHER_OVERRIDE ? level : SHAREFS_PERM_OTHER_OVERRIDE;
+}
+
 void fixup_perm_from_level(struct inode *dir, struct dentry *dentry)
 {
 	struct sharefs_inode_info *hii = SHAREFS_I(dir);
@@ -75,7 +82,6 @@ void sharefs_root_inode_perm_init(struct inode *root_inode)
 	hii->perm = SHAREFS_PERM_FIX;
 }
 
-#ifdef CONFIG_SHAREFS_SUPPORT_OVERRIDE
 const struct cred *sharefs_override_file_fsids(struct inode *dir, __u16 *_perm)
 {
 	struct cred *cred = NULL;
@@ -95,4 +101,3 @@ void sharefs_revert_fsids(const struct cred *old_cred)
 	revert_creds(old_cred);
 	put_cred(cur_cred);
 }
-#endif

@@ -10,6 +10,7 @@
  */
 
 #include "sharefs.h"
+#include "authentication.h"
 
 static int sharefs_readdir(struct file *file, struct dir_context *ctx)
 {
@@ -31,6 +32,14 @@ static int sharefs_open(struct inode *inode, struct file *file)
 	int err = 0;
 	struct file *lower_file = NULL;
 	struct path lower_path;
+	const struct cred *saved_cred = NULL;
+	__u16 perm;
+
+	saved_cred = sharefs_override_file_fsids(inode, &perm);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		return err;
+	}
 
 	/* don't open unhashed/deleted files */
 	if (d_unhashed(file->f_path.dentry)) {
@@ -72,6 +81,7 @@ static int sharefs_open(struct inode *inode, struct file *file)
 		inode->i_mode = mode;
 	}
 out_err:
+	sharefs_revert_fsids(saved_cred);
 	return err;
 }
 

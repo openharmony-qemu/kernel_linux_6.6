@@ -10,6 +10,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/xattr.h>
 #include "sharefs.h"
 #include "authentication.h"
 
@@ -17,6 +18,28 @@
 struct sharefs_mount_priv {
 	const char *dev_name;
 	const char *raw_data;
+};
+
+static int sharefs_xattr_get(const struct xattr_handler *handler,
+							 struct dentry *dentry, struct inode *inode,
+							 const char *name, void *value, size_t size)
+{
+	struct path lower_path;
+	ssize_t res = 0;
+
+	sharefs_get_lower_path(dentry, &lower_path);
+	res = vfs_getxattr(&nop_mnt_idmap, lower_path.dentry, name, value, size);
+	sharefs_put_lower_path(dentry, &lower_path);
+	return res;
+}
+
+const struct xattr_handler sharefs_xattr_handler = {
+	.prefix = "",
+	.get = sharefs_xattr_get,
+};
+
+const struct xattr_handler* sharefs_xattr_handlers[] = {
+	&sharefs_xattr_handler,
 };
 
 /*
@@ -66,7 +89,14 @@ static int sharefs_fill_super(struct super_block *sb, void *data, int silent)
 	 */
 	sb->s_time_gran = 1;
 
+	sb->s_xattr = sharefs_xattr_handlers;
+
 	sb->s_op = &sharefs_sops;
+	sb->s_magic = SHAREFS_SUPER_MAGIC;
+
+	err = sharefs_parse_options(sb->s_fs_info, raw_data);
+	if (err)
+		goto out_pput;
 
 	/* get a new inode and allocate our root dentry */
 	inode = sharefs_iget(sb, d_inode(lower_path.dentry));
@@ -81,10 +111,6 @@ static int sharefs_fill_super(struct super_block *sb, void *data, int silent)
 		goto out_pput;
 	}
 	d_set_d_op(sb->s_root, &sharefs_dops);
-
-	err = sharefs_parse_options(sb->s_fs_info, raw_data);
-	if (err)
-		goto out_pput;
 
 	/* link the upper and lower dentries */
 	sb->s_root->d_fsdata = NULL;

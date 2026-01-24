@@ -17,6 +17,10 @@
 #define SHAREFS_PERM_MNT           1
 #define SHAREFS_PERM_DFS           2
 #define SHAREFS_PERM_OTHER         3
+#define SHAREFS_PERM_ELX_OVERRIDE  1
+#define SHAREFS_PERM_BASE_OVERRIDE  2
+#define SHAREFS_PERM_PACKAGE_OVERRIDE  3
+#define SHAREFS_PERM_OTHER_OVERRIDE  4
 
 #define SHAREFS_READ_DIR  "r"
 #define SHAREFS_READWRITE_DIR "rw"
@@ -39,11 +43,11 @@ extern void sharefs_exit_configfs(void);
 
 void sharefs_root_inode_perm_init(struct inode *root_inode);
 void fixup_perm_from_level(struct inode *dir, struct dentry *dentry);
-#ifdef CONFIG_SHAREFS_SUPPORT_OVERRIDE
+__u16 perm_get_next_level_override(__u16 perm);
 const struct cred *sharefs_override_file_fsids(struct inode *dir,
 				 __u16 *_perm);
 void sharefs_revert_fsids(const struct cred *old_cred);
-#endif
+
 
 static inline bool is_read_only_auth(__u16 perm)
 {

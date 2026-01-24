@@ -10,9 +10,7 @@
  */
 
 #include "sharefs.h"
-#ifdef CONFIG_SHAREFS_SUPPORT_WRITE
 #include "authentication.h"
-#endif
 
 static int sharefs_getattr(struct mnt_idmap *idmap, const struct path *path, struct kstat *stat, 
                           u32 request_mask, unsigned int flags)
@@ -57,10 +55,11 @@ out:
 
 static int sharefs_permission(struct mnt_idmap *idmap, struct inode *inode, int mask)
 {
-#ifdef CONFIG_SHAREFS_SUPPORT_OVERRIDE
-	return 0;
-#endif
-	unsigned short mode = inode->i_mode;
+	struct sharefs_sb_info *sbi = SHAREFS_SB(inode->i_sb);
+	if (sbi->override_support_delete) {
+		return 0;
+	}
+	unsigned short mode = sharefs_lower_inode(inode)->i_mode;
 	kuid_t cur_uid = current_fsuid();
 	if (uid_eq(cur_uid, ROOT_UID))
 		return 0;
@@ -76,7 +75,21 @@ static int sharefs_permission(struct mnt_idmap *idmap, struct inode *inode, int 
 	return -EACCES;
 }
 
-#ifdef CONFIG_SHAREFS_SUPPORT_WRITE
+static int sharefs_override_permission(struct mnt_idmap *idmap, struct inode *inode, int mask)
+{
+	unsigned short mode = sharefs_lower_inode(inode)->i_mode;
+	mode >>= 6;
+	kuid_t cur_uid = current_fsuid();
+	if (uid_eq(cur_uid, ROOT_UID)) {
+		return 0;
+	}
+
+	if ((mask & ~mode & (MAY_READ | MAY_WRITE | MAY_EXEC)) == 0) {
+		return 0;
+	}
+	return -EACCES;
+}
+
 static int sharefs_create(struct mnt_idmap *idmap, struct inode *dir, struct dentry *dentry,
 			 umode_t mode, bool want_excl)
 {
@@ -158,6 +171,14 @@ static int sharefs_unlink(struct inode *dir, struct dentry *dentry)
 	struct inode *lower_dir_inode = sharefs_lower_inode(dir);
 	struct dentry *lower_dir_dentry = NULL;
 	struct path lower_path;
+	const struct cred *saved_cred = NULL;
+	__u16 child_perm;
+
+	saved_cred = sharefs_override_file_fsids(dir, &child_perm);
+	if (!saved_cred) {
+			err = -ENOMEM;
+			return err;
+	}
 
 	sharefs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
@@ -177,6 +198,7 @@ out:
 	unlock_dir(lower_dir_dentry);
 	dput(lower_dentry);
 	sharefs_put_lower_path(dentry, &lower_path);
+	sharefs_revert_fsids(saved_cred);
 	return err;
 }
 
@@ -186,6 +208,14 @@ static int sharefs_rmdir(struct inode *dir, struct dentry *dentry)
 	struct dentry *lower_dentry;
 	struct dentry *lower_dir_dentry;
 	struct path lower_path;
+	const struct cred *saved_cred = NULL;
+	__u16 child_perm;
+	
+	saved_cred = sharefs_override_file_fsids(dir, &child_perm);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		return err;
+	}
 
 	sharefs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
@@ -204,9 +234,18 @@ static int sharefs_rmdir(struct inode *dir, struct dentry *dentry)
 out:
 	unlock_dir(lower_dir_dentry);
 	sharefs_put_lower_path(dentry, &lower_path);
+	sharefs_revert_fsids(saved_cred);
 	return err;
 }
 
+static int sharefs_check_lower_rename(struct super_block *old_sb, struct super_block *new_sb)
+{
+	if (old_sb->s_id != new_sb->s_id) {
+		return -EXDEV;
+	} 
+
+	return 0;
+}
 static int sharefs_rename(struct mnt_idmap *idmap, struct inode *old_dir, struct dentry *old_dentry,
 				struct inode *new_dir, struct dentry *new_dentry,
 				unsigned int flags)
@@ -219,9 +258,17 @@ static int sharefs_rename(struct mnt_idmap *idmap, struct inode *old_dir, struct
 	struct dentry *trap = NULL;
 	struct path lower_old_path, lower_new_path;
 	struct renamedata rename_data;
+	const struct cred *saved_cred = NULL;
+	__u16 child_perm;
 
 	if (flags)
 		return -EINVAL;
+
+	saved_cred = sharefs_override_file_fsids(old_dir, &child_perm);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		return err;
+	}
 
 	sharefs_get_lower_path(old_dentry, &lower_old_path);
 	sharefs_get_lower_path(new_dentry, &lower_new_path);
@@ -248,6 +295,11 @@ static int sharefs_rename(struct mnt_idmap *idmap, struct inode *old_dir, struct
 	rename_data.new_dir = lower_new_dir_dentry->d_inode;
 	rename_data.new_dentry = lower_new_dentry;
 	rename_data.flags = flags;
+
+	err = sharefs_check_lower_rename(lower_old_path.mnt->mnt_sb, lower_new_path.mnt->mnt_sb);
+	if (err != 0) {
+		goto out;
+	}
 	err = vfs_rename(&rename_data);
 	if (err)
 		goto out;
@@ -267,9 +319,9 @@ out:
 	dput(lower_new_dir_dentry);
 	sharefs_put_lower_path(old_dentry, &lower_old_path);
 	sharefs_put_lower_path(new_dentry, &lower_new_path);
+	sharefs_revert_fsids(saved_cred);
 	return err;
 }
-#endif
 
 static int sharefs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, struct iattr *ia)
 {
@@ -286,6 +338,14 @@ static int sharefs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, struc
 	 * this user can change the lower inode: that should happen when
 	 * calling notify_change on the lower inode.
 	 */
+ 	const struct cred *saved_cred = NULL;
+ 	__u16 child_perm;
+ 	 
+	saved_cred = sharefs_override_file_fsids(inode, &child_perm);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		goto out_err;
+	}
 
 	err = setattr_prepare(&nop_mnt_idmap, dentry, ia);
 	if (err)
@@ -342,6 +402,7 @@ static int sharefs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, struc
 
 out:
 	sharefs_put_lower_path(dentry, &lower_path);
+	sharefs_revert_fsids(saved_cred);
 out_err:
 	return err;
 }
@@ -359,13 +420,19 @@ const struct inode_operations sharefs_dir_iops = {
 	.getattr	= sharefs_getattr,
 	.listxattr	= sharefs_listxattr,
 	.setattr	= sharefs_setattr,
-#ifdef CONFIG_SHAREFS_SUPPORT_WRITE
+};
+
+const struct inode_operations sharefs_dir_override_iops = {
+	.lookup		= sharefs_override_lookup,
+	.permission	= sharefs_override_permission,
+	.getattr	= sharefs_getattr,
+	.listxattr	= sharefs_listxattr,
+	.setattr	= sharefs_setattr,
 	.unlink		= sharefs_unlink,
 	.rmdir		= sharefs_rmdir,
 	.rename		= sharefs_rename,
 	.create		= sharefs_create,
 	.mkdir		= sharefs_mkdir,
-#endif
 };
 
 const struct inode_operations sharefs_main_iops = {

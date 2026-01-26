@@ -1894,6 +1894,24 @@ int security_path_chroot(const struct path *path)
 {
 	return call_int_hook(path_chroot, 0, path);
 }
+
+#ifdef CONFIG_SECURITY_DEC
+/**
+ * security_path_access() - Check if accessing a file is allowed
+ * @path: path of the file
+ * @mask: requested access mask
+ * 
+ * Check permission to access a file.
+ * 
+ * Return: Returns 0 if permission is granted.
+ */
+int security_path_access(const struct path *path, int mask)
+{
+	if (unlikely(IS_PRIVATE(d_backing_inode(path->dentry))))
+		return 0;
+	return call_int_hook(path_access, 0, path, mask);
+}
+#endif /* CONFIG_SECURITY_DEC */
 #endif /* CONFIG_SECURITY_PATH */
 
 /**

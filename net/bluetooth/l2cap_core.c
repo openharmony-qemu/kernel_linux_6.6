@@ -413,9 +413,8 @@ static void l2cap_chan_timeout(struct work_struct *work)
 
 	if (!conn)
 		return;
-
-	mutex_lock(&conn->lock);
 	/* __set_chan_timer() calls l2cap_chan_hold(chan) while scheduling
+	mutex_lock(&conn->chan_lock);
 	 * this work. No need to call l2cap_chan_hold(chan) here again.
 	 */
 	l2cap_chan_lock(chan);

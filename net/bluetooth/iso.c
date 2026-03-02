@@ -1216,7 +1216,7 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 		return -ENOTCONN;
 	}
 
-	mtu = iso_pi(sk)->conn->hcon->mtu;
+	mtu = iso_pi(sk)->conn->hcon->hdev->iso_mtu;
 
 	release_sock(sk);
 
@@ -1314,13 +1314,8 @@ static int iso_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 		lock_sock(sk);
 		switch (sk->sk_state) {
 		case BT_CONNECT2:
-			if (test_bit(BT_SK_PA_SYNC, &pi->flags)) {
-				iso_conn_big_sync(sk);
-				sk->sk_state = BT_LISTEN;
-			} else {
-				iso_conn_defer_accept(pi->conn->hcon);
-				sk->sk_state = BT_CONFIG;
-			}
+			iso_conn_defer_accept(pi->conn->hcon);
+			sk->sk_state = BT_CONFIG;
 			release_sock(sk);
 			return 0;
 		case BT_CONNECT:

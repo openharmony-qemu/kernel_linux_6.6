@@ -18,6 +18,7 @@
 #include "hfsplus_fs.h"
 #include "hfsplus_raw.h"
 
+
 /* Copy a specified range of bytes from the raw data of a node */
 void hfs_bnode_read(struct hfs_bnode *node, void *buf, int off, int len)
 {

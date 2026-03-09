@@ -14,7 +14,7 @@
  * memory ranges: uncached, write-combining, write-through, write-protected,
  * and the most commonly used and default attribute: write-back caching.
  *
- * PAT support supercedes and augments MTRR support in a compatible fashion: MTRR is
+ * PAT support supersedes and augments MTRR support in a compatible fashion: MTRR is
  * a hardware interface to enumerate a limited number of physical memory ranges
  * and set their caching attributes explicitly, programmed into the CPU via MSRs.
  * Even modern CPUs have MTRRs enabled - but these are typically not touched
@@ -240,6 +240,8 @@ void pat_cpu_init(void)
 	}
 
 	wrmsrl(MSR_IA32_CR_PAT, pat_msr_val);
+
+	__flush_tlb_all();
 }
 
 /**
@@ -296,13 +298,8 @@ void __init pat_bp_init(void)
 	/*
 	 * Xen PV doesn't allow to set PAT MSR, but all cache modes are
 	 * supported.
-	 * When running as TDX guest setting the PAT MSR won't work either
-	 * due to the requirement to set CR0.CD when doing so. Rely on
-	 * firmware to have set the PAT MSR correctly.
 	 */
-	if (pat_disabled ||
-	    cpu_feature_enabled(X86_FEATURE_XENPV) ||
-	    cpu_feature_enabled(X86_FEATURE_TDX_GUEST)) {
+	if (pat_disabled || cpu_feature_enabled(X86_FEATURE_XENPV)) {
 		init_cache_modes(pat_msr_val);
 		return;
 	}
@@ -982,40 +979,27 @@ static int get_pat_info(struct vm_area_struct *vma, resource_size_t *paddr,
 	return -EINVAL;
 }
 
-int track_pfn_copy(struct vm_area_struct *dst_vma,
-		struct vm_area_struct *src_vma, unsigned long *pfn)
+/*
+ * track_pfn_copy is called when vma that is covering the pfnmap gets
+ * copied through copy_page_range().
+ *
+ * If the vma has a linear pfn mapping for the entire range, we get the prot
+ * from pte and reserve the entire vma range with single reserve_pfn_range call.
+ */
+int track_pfn_copy(struct vm_area_struct *vma)
 {
-	const unsigned long vma_size = src_vma->vm_end - src_vma->vm_start;
 	resource_size_t paddr;
+	unsigned long vma_size = vma->vm_end - vma->vm_start;
 	pgprot_t pgprot;
-	int rc;
 
-	if (!(src_vma->vm_flags & VM_PAT))
-		return 0;
+	if (vma->vm_flags & VM_PAT) {
+		if (get_pat_info(vma, &paddr, &pgprot))
+			return -EINVAL;
+		/* reserve the whole chunk covered by vma. */
+		return reserve_pfn_range(paddr, vma_size, &pgprot, 1);
+	}
 
-	/*
-	 * Duplicate the PAT information for the dst VMA based on the src
-	 * VMA.
-	 */
-	if (get_pat_info(src_vma, &paddr, &pgprot))
-		return -EINVAL;
-	rc = reserve_pfn_range(paddr, vma_size, &pgprot, 1);
-	if (rc)
-		return rc;
-
-	/* Reservation for the destination VMA succeeded. */
-	vm_flags_set(dst_vma, VM_PAT);
-	*pfn = PHYS_PFN(paddr);
 	return 0;
-}
-
-void untrack_pfn_copy(struct vm_area_struct *dst_vma, unsigned long pfn)
-{
-	untrack_pfn(dst_vma, pfn, dst_vma->vm_end - dst_vma->vm_start, true);
-	/*
-	 * Reservation was freed, any copied page tables will get cleaned
-	 * up later, but without getting PAT involved again.
-	 */
 }
 
 /*
@@ -1106,6 +1090,15 @@ void untrack_pfn(struct vm_area_struct *vma, unsigned long pfn,
 	}
 }
 
+/*
+ * untrack_pfn_clear is called if the following situation fits:
+ *
+ * 1) while mremapping a pfnmap for a new region,  with the old vma after
+ * its pfnmap page table has been removed.  The new vma has a new pfnmap
+ * to the same pfn & cache type with VM_PAT set.
+ * 2) while duplicating vm area, the new vma fails to copy the pgtable from
+ * old vma.
+ */
 void untrack_pfn_clear(struct vm_area_struct *vma)
 {
 	vm_flags_clear(vma, VM_PAT);

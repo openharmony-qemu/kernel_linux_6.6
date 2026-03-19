@@ -2364,6 +2364,38 @@ out_put_root:
 	path_put(&root_path);
 }
 
+void hmdfs_add_remote_page_cache_list(struct hmdfs_peer *con, struct file *file)
+{
+	struct remotecache_item *item = NULL;
+	struct remotecache_item *item_temp = NULL;
+	struct hmdfs_dentry_info *d_info = NULL;
+
+	d_info = hmdfs_d(file->f_path.dentry);
+	if (!d_info)
+		return;
+
+	/* find duplicate con */
+	mutex_lock(&d_info->remote_cache_list_lock);
+	list_for_each_entry_safe(item, item_temp,
+				 &(d_info->remote_cache_list_head), list) {
+		if (item->con->device_id == con->device_id) {
+			mutex_unlock(&d_info->remote_cache_list_lock);
+			return;
+		}
+	}
+
+	item = kzalloc(sizeof(*item), GFP_KERNEL);
+	if (!item) {
+		mutex_unlock(&d_info->remote_cache_list_lock);
+		return;
+	}
+
+	item->con = con;
+	item->drop_flag = 0;
+	list_add(&(item->list), &(d_info->remote_cache_list_head));
+	mutex_unlock(&d_info->remote_cache_list_lock);
+}
+
 int hmdfs_drop_remote_cache_dents(struct dentry *dentry)
 {
 	struct path lower_path;
@@ -2411,6 +2443,46 @@ int hmdfs_drop_remote_cache_dents(struct dentry *dentry)
 		mutex_unlock(&d_info->remote_cache_list_lock);
 		hmdfs_send_drop_push(item->con, relative_path);
 		mutex_lock(&d_info->remote_cache_list_lock);
+		list_del(&item->list);
+		kfree(item);
+	}
+	mutex_unlock(&d_info->remote_cache_list_lock);
+
+	kfree(relative_path);
+	return 0;
+}
+
+int hmdfs_drop_remote_cache_pages(struct dentry *dentry)
+{
+	struct remotecache_item *item = NULL;
+	struct remotecache_item *item_temp = NULL;
+	struct hmdfs_dentry_info *d_info = NULL;
+	char *relative_path = NULL;
+
+	if (!dentry) {
+		hmdfs_err("dentry null and return");
+		return 0;
+	}
+
+	d_info = hmdfs_d(dentry);
+	if (!d_info) {
+		hmdfs_err("d_info null and return");
+		return 0;
+	}
+	relative_path = hmdfs_get_dentry_relative_path(dentry);
+	if (!relative_path) {
+		hmdfs_err("get dentry relative path failed");
+		return 0;
+	}
+	mutex_lock(&d_info->remote_cache_list_lock);
+	list_for_each_entry_safe(item, item_temp,
+				 &(d_info->remote_cache_list_head), list) {
+		if (item->drop_flag == 1) {
+			item->drop_flag = 0;
+			continue;
+		}
+		hmdfs_send_drop_page_push(item->con, relative_path,
+					  dentry->d_inode);
 		list_del(&item->list);
 		kfree(item);
 	}

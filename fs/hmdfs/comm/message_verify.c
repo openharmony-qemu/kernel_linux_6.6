@@ -27,6 +27,7 @@ void hmdfs_message_verify_init(void)
 	need_response[F_RELEASE] = false;
 	need_response[F_CONNECT_REKEY] = false;
 	need_response[F_DROP_PUSH] = false;
+	need_response[F_DROP_PAGE_PUSH] = false;
 
 	for (flag = 0; flag < C_FLAG_SIZE; flag++) {
 		for (cmd = 0; cmd < F_SIZE; cmd++) {
@@ -43,11 +44,12 @@ void hmdfs_message_verify_init(void)
 		sizeof(struct open_request) + PATH_MAX + 1;
 	message_length[C_REQUEST][F_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
 		MESSAGE_LEN_JUDGE_RANGE;
-	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MIN_INDEX] = 0;
+	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MIN_INDEX] = sizeof(
+ 	 		struct open_response) - HMDFS_PAGE_SIZE - 1;
 	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MAX_INDEX] =
 		sizeof(struct open_response);
 	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
-		MESSAGE_LEN_JUDGE_BIN;
+		MESSAGE_LEN_JUDGE_RANGE;
 
 	message_length[C_REQUEST][F_ATOMIC_OPEN][HMDFS_MESSAGE_MIN_INDEX] =
 		sizeof(struct atomic_open_request);
@@ -269,6 +271,13 @@ void hmdfs_message_verify_init(void)
 		sizeof(struct drop_push_request) + PATH_MAX + 1;
 	message_length[C_REQUEST][F_DROP_PUSH][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
 		MESSAGE_LEN_JUDGE_RANGE;
+	
+	message_length[C_REQUEST][F_DROP_PAGE_PUSH][HMDFS_MESSAGE_MIN_INDEX] =
+ 	 	sizeof(struct drop_page_push_request);
+ 	message_length[C_REQUEST][F_DROP_PAGE_PUSH][HMDFS_MESSAGE_MAX_INDEX] =
+ 	 	sizeof(struct drop_page_push_request) + PATH_MAX + 1;
+ 	message_length[C_REQUEST][F_DROP_PAGE_PUSH][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
+ 	 	MESSAGE_LEN_JUDGE_RANGE;
 }
 
 static int is_str_msg_valid(char *msg, int str_len[], size_t str_num)
@@ -308,7 +317,7 @@ static int verify_open_resp(size_t msg_len, void *msg)
 {
 	struct open_response *resp = msg;
 
-	if (msg_len != sizeof(*resp))
+	if (msg_len != sizeof(*resp) && msg_len != sizeof(*resp) - HMDFS_PAGE_SIZE - 1)
 		return -EINVAL;
 
 	return 0;
@@ -856,6 +865,34 @@ static int hmdfs_drop_push_verify(int flag, size_t msg_len, void *msg)
 	return 0;
 }
 
+static int verify_drop_page_push_req(size_t msg_len, void *msg)
+{
+ 	struct drop_page_push_request *req = msg;
+ 	int str_len[] = {req->path_len};
+ 	 
+ 	if (req->path_len < 0 || req->path_len >= PATH_MAX)
+ 	 	return -EINVAL;
+ 	 
+ 	if (msg_len != sizeof(*req) + req->path_len + 1)
+ 	 	return -EINVAL;
+ 	 
+ 	if (is_str_msg_valid(req->buf, str_len, sizeof(str_len) / sizeof(int)))
+ 	 	return -EINVAL;
+ 	 
+ 	return 0;
+}
+ 	 
+static int hmdfs_drop_page_push_verify(int flag, size_t msg_len, void *msg)
+{
+ 	if (!msg || !msg_len)
+ 	 	return 0;
+ 	 
+ 	if (flag == C_REQUEST)
+ 	 	return verify_drop_page_push_req(msg_len, msg);
+ 	 
+ 	return 0;
+}
+
 typedef int (*hmdfs_message_verify_func)(int, size_t, void *);
 
 static const hmdfs_message_verify_func message_verify[F_SIZE] = {
@@ -871,6 +908,7 @@ static const hmdfs_message_verify_func message_verify[F_SIZE] = {
 	[F_SETATTR] = hmdfs_setattr_verify,
 	[F_STATFS] = hmdfs_statfs_verify,
 	[F_DROP_PUSH] = hmdfs_drop_push_verify,
+	[F_DROP_PAGE_PUSH] = hmdfs_drop_page_push_verify,
 	[F_GETATTR] = hmdfs_getattr_verify,
 	[F_GETXATTR] = hmdfs_getxattr_verify,
 	[F_SETXATTR] = hmdfs_setxattr_verify,

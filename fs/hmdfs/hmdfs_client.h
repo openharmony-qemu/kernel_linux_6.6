@@ -18,6 +18,8 @@ struct hmdfs_open_ret {
 	__u64 ino;
 	struct hmdfs_time_t remote_ctime;
 	struct hmdfs_time_t stable_ctime;
+	__u8 read_success;
+ 	__u8 page[HMDFS_PAGE_SIZE];
 };
 
 struct hmdfs_writepage_context {

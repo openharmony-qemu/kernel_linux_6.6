@@ -537,9 +537,52 @@ static ssize_t hmdfs_merge_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	return hmdfs_do_read_iter(iocb->ki_filp, iter, &iocb->ki_pos);
 }
 
+static void hmdfs_file_modified(struct file *file)
+{
+	struct inode *inode = file_inode(file);
+	struct dentry *dentry = file_dentry(file);
+	struct file *lower_file = hmdfs_f(file)->lower_file;
+	struct inode *lower_inode = file_inode(lower_file);
+
+	inode->i_atime = lower_inode->i_atime;
+	inode->__i_ctime = lower_inode->__i_ctime;
+	inode->i_mtime = lower_inode->i_mtime;
+	i_size_write(inode, i_size_read(lower_inode));
+
+	if (!hmdfs_i_merge(hmdfs_i(inode)))
+		update_inode_to_dentry(dentry, inode);
+}
+
+ssize_t hmdfs_do_write_iter_merge(struct file *file, struct iov_iter *iter,
+				  loff_t *ppos)
+{
+	ssize_t ret;
+	struct file *lower_file = hmdfs_f(file)->lower_file;
+	struct inode *inode = file_inode(file);
+
+	if (!iov_iter_count(iter))
+		return 0;
+
+	inode_lock(inode);
+
+	ret = file_remove_privs(file);
+	if (ret)
+		goto out_unlock;
+
+	file_start_write(lower_file);
+	ret = vfs_iter_write(lower_file, iter, ppos, 0);
+	file_end_write(lower_file);
+
+	hmdfs_file_modified(file);
+
+out_unlock:
+	inode_unlock(inode);
+	return ret;
+}
+
 ssize_t hmdfs_merge_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
-	return hmdfs_do_write_iter(iocb->ki_filp, iter, &iocb->ki_pos);
+	return hmdfs_do_write_iter_merge(iocb->ki_filp, iter, &iocb->ki_pos);
 }
 
 int hmdfs_file_open_merge(struct inode *inode, struct file *file)
@@ -578,6 +621,19 @@ int hmdfs_file_open_merge(struct inode *inode, struct file *file)
 out_err:
 	dput(lo_p.dentry);
 	return err;
+}
+
+int hmdfs_file_release_merge(struct inode *inode, struct file *file)
+{
+	struct hmdfs_file_info *gfi = hmdfs_f(file);
+	struct hmdfs_inode_info *info = hmdfs_i(inode);
+
+	if (file->f_flags & (O_RDWR | O_WRONLY))
+		atomic_dec(&info->write_opened);
+	file->private_data = NULL;
+	fput(gfi->lower_file);
+	kfree(gfi);
+	return 0;
 }
 
 int hmdfs_file_flush_merge(struct file *file, fl_owner_t id)
@@ -832,7 +888,7 @@ const struct file_operations hmdfs_file_fops_merge = {
 	.mmap = hmdfs_file_mmap_local,
 	.open = hmdfs_file_open_merge,
 	.flush = hmdfs_file_flush_merge,
-	.release = hmdfs_file_release_local,
+	.release = hmdfs_file_release_merge,
 	.fsync = hmdfs_fsync_local,
 	.unlocked_ioctl	= hmdfs_file_ioctl_merge,
 	.compat_ioctl = hmdfs_file_ioctl_merge,

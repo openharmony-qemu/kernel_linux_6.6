@@ -315,6 +315,9 @@ static struct inode *hmdfs_alloc_inode(struct super_block *sb)
 	if (!gi)
 		return NULL;
 	memset(gi, 0, offsetof(struct hmdfs_inode_info, vfs_inode));
+	gi->need_reopen = true;
+ 	gi->modified = false;
+ 	spin_lock_init(&gi->modify_lock);
 	INIT_LIST_HEAD(&gi->wb_list);
 	init_rwsem(&gi->wpage_sem);
 	gi->getattr_isize = HMDFS_STALE_REMOTE_ISIZE;
@@ -698,6 +701,7 @@ static void hmdfs_init_cmd_timeout(struct hmdfs_sb_info *sbi)
 	set_cmd_timeout(sbi, F_STATFS, TIMEOUT_COMMON);
 	set_cmd_timeout(sbi, F_CONNECT_REKEY, TIMEOUT_NONE);
 	set_cmd_timeout(sbi, F_DROP_PUSH, TIMEOUT_NONE);
+	set_cmd_timeout(sbi, F_DROP_PAGE_PUSH, TIMEOUT_NONE);
 	set_cmd_timeout(sbi, F_GETATTR, TIMEOUT_COMMON);
 	set_cmd_timeout(sbi, F_FSYNC, TIMEOUT_90S);
 	set_cmd_timeout(sbi, F_SYNCFS, TIMEOUT_30S);

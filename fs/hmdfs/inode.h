@@ -69,6 +69,9 @@ struct hmdfs_inode_info {
 	struct inode *lower_inode; // for local/merge inode
 	struct hmdfs_peer *conn;   // for remote inode
 	struct kref ref;
+	bool need_reopen;
+ 	spinlock_t modify_lock;
+ 	bool modified;
 	spinlock_t fid_lock;
 	struct hmdfs_fid fid;
 	unsigned long fid_flags;

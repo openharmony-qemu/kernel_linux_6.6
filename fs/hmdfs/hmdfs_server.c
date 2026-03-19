@@ -460,7 +460,10 @@ static void hmdfs_update_open_response(struct hmdfs_peer *con,
 		msec_to_timespec(con->sbi->dcache_precision);
 	loff_t size = info->stat_valid ? info->stat.size :
 					 i_size_read(info->inode);
+    loff_t pos = 0;
+ 	ssize_t readsize = 0;
 
+	// NB: info->real_ino is the lower_file's i_ino and i_igeneration, not the info->file's
 	resp->ino = cpu_to_le64(info->real_ino);
 	resp->file_ver = cpu_to_le64(hmdfs_server_pack_fid_ver(con, cmd));
 	resp->file_id = cpu_to_le32(info->file_id);
@@ -487,6 +490,17 @@ static void hmdfs_update_open_response(struct hmdfs_peer *con,
 	} else {
 		resp->stable_ctime = cpu_to_le64(precision.tv_sec);
 		resp->stable_ctime_nsec = cpu_to_le32(precision.tv_nsec);
+	}
+
+	if (hm_isprefetch(cmd->operations.reserved)) {
+		readsize = kernel_read(info->file, resp->page, HMDFS_PAGE_SIZE, &pos);
+		if (readsize < 0) {
+			resp->read_success = 0;
+		} else {
+			resp->read_success = 1;
+			if (readsize != HMDFS_PAGE_SIZE)
+				memset(resp->page + readsize, 0, HMDFS_PAGE_SIZE - readsize);
+		}
 	}
 }
 
@@ -532,66 +546,6 @@ static int hmdfs_get_open_info(struct hmdfs_peer *con, uint8_t file_type,
 							info->inode->i_generation);
 	}
 	return 0;
-}
-
-void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
-		       void *data)
-{
-	struct open_request *recv = data;
-	int sizeread = sizeof(struct open_response);
-	struct open_response *resp = NULL;
-	struct hmdfs_open_info *info = NULL;
-	int ret = 0;
-
-	trace_hmdfs_server_open_enter(con, recv);
-
-	resp = kzalloc(sizeread, GFP_KERNEL);
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
-	if (!resp || !info) {
-		ret = -ENOMEM;
-		goto err_free;
-	}
-
-	if (path_contain_dotdot(recv->buf, recv->path_len)) {
-		ret = -EINVAL;
-		goto err_free;
-	}
-
-	info->file = hmdfs_open_file(con, recv->buf, recv->file_type,
-				     &info->file_id);
-	if (IS_ERR(info->file)) {
-		ret = PTR_ERR(info->file);
-		goto err_free;
-	}
-
-	ret = hmdfs_get_open_info(con, recv->file_type, recv->buf, info);
-	if (ret)
-		goto err_close;
-
-	hmdfs_update_open_response(con, cmd, info, resp);
-
-	trace_hmdfs_server_open_exit(con, resp, info->file, 0);
-	ret = hmdfs_sendmessage_response(con, cmd, sizeread, resp, 0);
-	if (ret) {
-		hmdfs_err("sending msg response failed, file_id %d, err %d",
-			  info->file_id, ret);
-		remove_file_from_conn(con, info->file_id);
-		hmdfs_close_path(info->file);
-	}
-	hmdfs_close_path(info->file);
-	kfree(resp);
-	kfree(info);
-	return;
-
-err_close:
-	hmdfs_close_path(info->file);
-	remove_file_from_conn(con, info->file_id);
-	hmdfs_close_path(info->file);
-err_free:
-	kfree(resp);
-	kfree(info);
-	trace_hmdfs_server_open_exit(con, NULL, NULL, ret);
-	hmdfs_send_err_response(con, cmd, ret);
 }
 
 static int hmdfs_check_and_create(struct path *path_parent,
@@ -1050,7 +1004,7 @@ static int server_lookup(struct hmdfs_peer *peer, const char *req_path,
 		goto out_noroot;
 
 	err = vfs_path_lookup(root_path.dentry, root_path.mnt, req_path,
-			      LOOKUP_DIRECTORY, path);
+			            0, path);
 	path_put(&root_path);
 out_noroot:
 	return err;
@@ -1085,6 +1039,74 @@ static char *server_lookup_lower(struct hmdfs_peer *peer, const char *req_path,
 	}
 out:
 	return err ? ERR_PTR(err) : lo_p_name;
+}
+
+void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
+		       void *data)
+{
+	struct open_request *recv = data;
+	bool is_prefetch = hm_isprefetch(cmd->operations.reserved);
+	int sizeread = sizeof(struct open_response) -
+		       (is_prefetch ? 0 : HMDFS_PAGE_SIZE + 1);
+	struct open_response *resp = NULL;
+	struct hmdfs_open_info *info = NULL;
+	int ret = 0;
+
+	trace_hmdfs_server_open_enter(con, recv);
+
+	resp = kzalloc(sizeread, GFP_KERNEL);
+	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	if (!resp || !info) {
+		ret = -ENOMEM;
+		goto err_free;
+	}
+
+	if (path_contain_dotdot(recv->buf, recv->path_len)) {
+		ret = -EINVAL;
+		goto err_free;
+	}
+
+	info->file = hmdfs_open_file(con, recv->buf, recv->file_type,
+				     &info->file_id);
+
+	if (IS_ERR(info->file)) {
+		ret = PTR_ERR(info->file);
+		goto err_free;
+	}
+
+	ret = hmdfs_get_open_info(con, recv->file_type, recv->buf, info);
+	if (ret)
+		goto err_close;
+
+	hmdfs_update_open_response(con, cmd, info, resp);
+
+	trace_hmdfs_server_open_exit(con, resp, info->file, 0);
+	ret = hmdfs_sendmessage_response(con, cmd, sizeread, resp, 0);
+	if (ret) {
+		hmdfs_err("sending msg response failed, file_id %d, err %d",
+			  info->file_id, ret);
+		remove_file_from_conn(con, info->file_id);
+		goto out;
+	}
+
+	if (is_prefetch)
+		hmdfs_add_remote_page_cache_list(con, info->file);
+
+out:
+	hmdfs_close_path(info->file);
+	kfree(resp);
+	kfree(info);
+	return;
+
+err_close:
+	hmdfs_close_path(info->file);
+	remove_file_from_conn(con, info->file_id);
+	hmdfs_close_path(info->file);
+err_free:
+	kfree(resp);
+	kfree(info);
+	trace_hmdfs_server_open_exit(con, NULL, NULL, ret);
+	hmdfs_send_err_response(con, cmd, ret);
 }
 
 void hmdfs_server_readdir(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
@@ -1441,6 +1463,7 @@ static bool hmdfs_filldir_real(struct dir_context *ctx, const char *name,
 	}
 
 	if (d_type == DT_REG || d_type == DT_DIR) {
+		// gc->file is dentry_file, the anonymous tmp_file
 		create_dentry(child, d_inode(child), gc->file, gc->sbi);
 		gc->num++;
 	} else if (d_type == DT_LNK) {
@@ -1500,12 +1523,14 @@ struct file *hmdfs_server_rebuild_dents(struct hmdfs_sb_info *sbi,
 	struct file *dentry_file = NULL;
 	struct hmdfs_dcache_header header;
 
+	// create a anonymous tmp_file in sbi->cache_dir
 	dentry_file = create_local_dentry_file_cache(sbi);
 	if (IS_ERR(dentry_file)) {
 		hmdfs_err("file create failed err=%ld", PTR_ERR(dentry_file));
 		return dentry_file;
 	}
 
+	// path is the lower path of the target dir
 	file = dentry_open(path, O_RDONLY | O_DIRECTORY, current_cred());
 	if (IS_ERR(file)) {
 		err = PTR_ERR(file);
@@ -1556,6 +1581,10 @@ void hmdfs_server_writepage(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 	ssize_t ret;
 	int err = 0;
 
+	struct remotecache_item *item = NULL;
+ 	struct remotecache_item *item_temp = NULL;
+ 	struct hmdfs_dentry_info *d_info = NULL;
+
 	file_id = le32_to_cpu(writepage_recv->file_id);
 	file_ver = le64_to_cpu(writepage_recv->file_ver);
 	file = get_file_by_fid_and_ver(con, cmd, file_id, file_ver);
@@ -1567,12 +1596,24 @@ void hmdfs_server_writepage(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 		err = PTR_ERR(file);
 		goto out;
 	}
+	d_info = hmdfs_d(file->f_path.dentry);
 
 	pos = (loff_t)le64_to_cpu(writepage_recv->index) << HMDFS_PAGE_OFFSET;
 	count = le32_to_cpu(writepage_recv->count);
 	ret = kernel_write(file, writepage_recv->buf, count, &pos);
 	if (ret != count)
 		err = -EIO;
+	else if (d_info) {
+		mutex_lock(&d_info->remote_cache_list_lock);
+		list_for_each_entry_safe(item, item_temp,
+					             &(d_info->remote_cache_list_head), list) {
+			if (item->con->device_id == con->device_id) {
+				item->drop_flag = 1;
+				break;
+			}
+		}
+		mutex_unlock(&d_info->remote_cache_list_lock);
+	}
 
 	hmdfs_close_path(file);
 out:
@@ -2120,6 +2161,91 @@ free:
 	kfree(tmp_path);
 out:
 	path_put(&root_path);
+quickack:
+	set_conn_sock_quickack(con);
+}
+
+static struct drop_page_push_recv init_drop_page_push_recv(void *data)
+{
+	struct drop_page_push_request *dpp_recv = data;
+	struct drop_page_push_recv dppr = {
+		.file_size = le64_to_cpu(dpp_recv->file_size),
+		.path_len = le32_to_cpu(dpp_recv->path_len),
+		.buf = dpp_recv->buf,
+	};
+	dppr.remote_ctime.tv_sec = le64_to_cpu(dpp_recv->ctime);
+	dppr.remote_ctime.tv_nsec = le64_to_cpu(dpp_recv->ctime_nsec);
+	dppr.stable_ctime.tv_sec = le64_to_cpu(dpp_recv->stable_ctime);
+	dppr.stable_ctime.tv_nsec = le64_to_cpu(dpp_recv->stable_ctime_nsec);
+
+	return dppr;
+}
+
+void hmdfs_server_get_drop_page_push(struct hmdfs_peer *con,
+				                     struct hmdfs_head_cmd *cmd, void *data)
+{
+	struct drop_page_push_recv dpp_recv = init_drop_page_push_recv(data);
+	struct path root_path, path;
+	struct inode *inode;
+	struct hmdfs_inode_info *info;
+	char *tmp_path = NULL;
+	int err;
+
+	// Learn from hmdfs_server_get_drop_push
+	const char *root_name = con->sbi->real_dst;
+	if (path_contain_dotdot(dpp_recv.buf, dpp_recv.path_len)) {
+		err = -EINVAL;
+		goto quickack;
+	}
+
+	err = kern_path(root_name, 0, &root_path);
+	if (err) {
+		hmdfs_err("kern_path failed at %s, err = %d", root_name, err);
+		goto quickack;
+	}
+
+	tmp_path = kzalloc(PATH_MAX, GFP_KERNEL);
+	if (!tmp_path)
+		goto out_kfree;
+	snprintf(tmp_path, PATH_MAX, "/" DEVICE_VIEW_ROOT "/%s%s", con->cid,
+		 dpp_recv.buf);
+
+	err = vfs_path_lookup(root_path.dentry, root_path.mnt, tmp_path, 0,
+			              &path);
+	if (err) {
+		hmdfs_info("path found failed at %s, err = %d", dpp_recv.buf, err);
+		goto out_tfree;
+	}
+
+	inode = d_inode(path.dentry);
+	info = hmdfs_i(inode);
+
+	inode_lock(inode);
+
+	/*
+ 	 * It doesn't make sense to update metadata here but leaving the data obsolete.
+ 	 * But how to design here? Should we also transport the data here?
+ 	 * Transporting data means we may never open the file twice,
+ 	 * which may corrupt file reference counter in server when the file is not opened but the page cache is missing.
+ 	 */
+	// inode->i_ctime = dpp_recv.remote_ctime;
+	// info->remote_ctime = dpp_recv.remote_ctime;
+	// info->stable_ctime = dpp_recv.stable_ctime;
+
+	// i_size_write(inode, dpp_recv.file_size);
+
+	info->need_reopen = true;
+
+	inode_unlock(inode);
+
+	path_put(&path);
+
+out_tfree:
+	kfree(tmp_path);
+
+out_kfree:
+	path_put(&root_path);
+
 quickack:
 	set_conn_sock_quickack(con);
 }

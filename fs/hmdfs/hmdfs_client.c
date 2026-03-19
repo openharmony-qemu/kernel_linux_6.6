@@ -29,6 +29,28 @@ static inline void free_sm_outbuf(struct hmdfs_send_command *sm)
 	sm->out_buf = NULL;
 }
 
+static struct hmdfs_time_t msec_to_timespec(unsigned int msec)
+{
+	struct hmdfs_time_t timespec = {
+		.tv_sec = msec / MSEC_PER_SEC,
+		.tv_nsec = (msec % MSEC_PER_SEC) * NSEC_PER_MSEC,
+	};
+
+	return timespec;
+}
+
+static struct hmdfs_time_t hmdfs_current_kernel_time(void)
+{
+	struct hmdfs_time_t time;
+
+#if KERNEL_VERSION(4, 18, 0) < LINUX_VERSION_CODE
+	ktime_get_coarse_real_ts64(&time);
+#else
+	time = current_kernel_time();
+#endif
+	return time;
+}
+
 int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		    __u8 file_type, struct hmdfs_open_ret *open_ret)
 {
@@ -44,6 +66,7 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		.local_filp = NULL,
 	};
 	hmdfs_init_cmd(&sm.operations, F_OPEN);
+	hm_setprefetch(&sm.operations.reserved);
 
 	if (!open_req) {
 		ret = -ENOMEM;
@@ -69,6 +92,13 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 	open_ret->remote_ctime.tv_nsec = le32_to_cpu(resp->ctime_nsec);
 	open_ret->stable_ctime.tv_sec = le64_to_cpu(resp->stable_ctime);
 	open_ret->stable_ctime.tv_nsec = le32_to_cpu(resp->stable_ctime_nsec);
+	if (sm.out_len == sizeof(struct open_response)) {
+		open_ret->read_success = resp->read_success;
+		if (open_ret->read_success)
+			memcpy(open_ret->page, resp->page, HMDFS_PAGE_SIZE);
+	} else {
+		open_ret->read_success = EOPNOTSUPP;
+	}
 
 out:
 	free_sm_outbuf(&sm);
@@ -1045,6 +1075,53 @@ void hmdfs_send_drop_push(struct hmdfs_peer *con, const char *path)
 
 	hmdfs_sendmessage_request(con, &sm);
 	kfree(dp_req);
+}
+
+void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, struct inode *inode)
+{
+	int path_len = strlen(send_buf);
+	size_t send_len = sizeof(struct drop_page_push_request) + path_len + 1;
+	struct drop_page_push_request *dpp_req = kzalloc(send_len, GFP_KERNEL);
+	struct hmdfs_send_command sm = {
+		.data = dpp_req,
+		.len = send_len,
+		.out_buf = NULL,
+		.local_filp = NULL,
+	};
+
+	struct hmdfs_time_t current_time = hmdfs_current_kernel_time();
+	struct hmdfs_time_t ctime = inode->__i_ctime;
+	struct hmdfs_time_t precision =
+		msec_to_timespec(con->sbi->dcache_precision);
+
+	loff_t size = i_size_read(inode);
+
+	hmdfs_init_cmd(&sm.operations, F_DROP_PAGE_PUSH);
+	if (!dpp_req)
+		return;
+
+	dpp_req->file_size = cpu_to_le64(size);
+	dpp_req->ctime = cpu_to_le64(ctime.tv_sec);
+	dpp_req->ctime_nsec = cpu_to_le32(ctime.tv_nsec);
+
+	precision = hmdfs_time_add(ctime, precision);
+	if (hmdfs_time_compare(&current_time, &ctime) < 0) {
+		dpp_req->stable_ctime = cpu_to_le64(0);
+		dpp_req->stable_ctime_nsec = cpu_to_le32(0);
+	} else if (hmdfs_time_compare(&current_time, &ctime) >= 0 &&
+		   hmdfs_time_compare(&current_time, &precision) < 0) {
+		dpp_req->stable_ctime = dpp_req->ctime;
+		dpp_req->stable_ctime_nsec = dpp_req->ctime_nsec;
+	} else {
+		dpp_req->stable_ctime = cpu_to_le64(precision.tv_sec);
+		dpp_req->stable_ctime_nsec = cpu_to_le32(precision.tv_nsec);
+	}
+
+	dpp_req->path_len = cpu_to_le32(path_len);
+	strcpy(dpp_req->buf, send_buf);
+
+	hmdfs_sendmessage_request(con, &sm);
+	kfree(dpp_req);
 }
 
 static void *hmdfs_get_msg_next(struct hmdfs_peer *peer, int *id)

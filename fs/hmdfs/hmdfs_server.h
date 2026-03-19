@@ -20,6 +20,14 @@
 #define DATA_SEC_LEVEL_LABEL 	"user.security"
 #define DATA_SEC_LEVEL_LENGTH 	10
 
+struct drop_page_push_recv {
+	__u64 file_size;
+	struct hmdfs_time_t remote_ctime;
+	struct hmdfs_time_t stable_ctime;
+	__u32 path_len;
+	char *buf;
+};
+
 static inline void hmdfs_send_err_response(struct hmdfs_peer *con,
 					   struct hmdfs_head_cmd *cmd, int err)
 {
@@ -74,6 +82,8 @@ void hmdfs_server_listxattr(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 			    void *data);
 void hmdfs_server_get_drop_push(struct hmdfs_peer *con,
 				struct hmdfs_head_cmd *cmd, void *data);
+void hmdfs_server_get_drop_page_push(struct hmdfs_peer *con,
+ 	 			struct hmdfs_head_cmd *cmd, void *data);
 
 void __init hmdfs_server_add_node_evt_cb(void);
 #endif

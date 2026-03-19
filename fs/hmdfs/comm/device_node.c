@@ -1335,6 +1335,7 @@ HMDFS_CMD_ATTR(rename, F_RENAME);
 HMDFS_CMD_ATTR(setattr, F_SETATTR);
 HMDFS_CMD_ATTR(statfs, F_STATFS);
 HMDFS_CMD_ATTR(drop_push, F_DROP_PUSH);
+HMDFS_CMD_ATTR(drop_page_push, F_DROP_PAGE_PUSH);
 HMDFS_CMD_ATTR(getattr, F_GETATTR);
 HMDFS_CMD_ATTR(fsync, F_FSYNC);
 HMDFS_CMD_ATTR(syncfs, F_SYNCFS);
@@ -1354,6 +1355,7 @@ static struct attribute *sbi_timeout_attrs[] = {
 	ATTR_LIST(getattr),  ATTR_LIST(fsync),
 	ATTR_LIST(syncfs),   ATTR_LIST(getxattr),
 	ATTR_LIST(setxattr), ATTR_LIST(listxattr),
+	ATTR_LIST(drop_page_push),
 	NULL
 };
 ATTRIBUTE_GROUPS(sbi_timeout);

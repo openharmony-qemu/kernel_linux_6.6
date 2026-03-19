@@ -211,6 +211,7 @@ struct clearcache_item {
 };
 
 void hmdfs_add_remote_cache_list(struct hmdfs_peer *con, const char *dir_path);
+void hmdfs_add_remote_page_cache_list(struct hmdfs_peer *con, struct file *file);
 
 struct remotecache_item {
 	struct hmdfs_peer *con;
@@ -245,7 +246,9 @@ struct cache_file_callback {
 };
 
 int hmdfs_drop_remote_cache_dents(struct dentry *dentry);
+int hmdfs_drop_remote_cache_pages(struct dentry *dentry);
 void hmdfs_send_drop_push(struct hmdfs_peer *con, const char *path);
+void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, struct inode *inode);
 void hmdfs_mark_drop_flag(uint64_t device_id, struct dentry *dentry);
 void hmdfs_clear_drop_flag(struct dentry *dentry);
 void delete_in_cache_file(uint64_t dev_id, struct dentry *dentry);

@@ -154,7 +154,16 @@ set_fid_out:
 	return 0;
 }
 
-int hmdfs_do_open_remote(struct file *file, bool keep_cache)
+static void hmdfs_set_page_content(struct page *page, const void *data)
+{
+	void *addr;
+	addr = kmap(page);
+	memcpy(addr, data, HMDFS_PAGE_SIZE);
+	SetPageUptodate(page);
+	kunmap(page);
+}
+
+int hmdfs_do_open_remote(struct inode *inode, struct file *file, bool keep_cache)
 {
 	struct hmdfs_inode_info *info = hmdfs_i(file_inode(file));
 	struct hmdfs_peer *conn = info->conn;
@@ -175,6 +184,22 @@ int hmdfs_do_open_remote(struct file *file, bool keep_cache)
 	}
 
 	err = hmdfs_open_final_remote(info, &open_ret, file, keep_cache);
+	if (err) {
+		hmdfs_err("hmdfs_open_final_remote return failed with %d", err);
+		goto out_free;
+	}
+
+	struct page *page = grab_cache_page(inode->i_mapping, 0);
+	if (!IS_ERR(page)) {
+		if (open_ret.read_success == 1) {
+			hmdfs_set_page_content(page, open_ret.page);
+			unlock_page(page);
+		} else {
+			unlock_page(page);
+			put_page(page);
+			err = open_ret.read_success;
+		}
+	}
 
 out_free:
 	kfree(send_buf);
@@ -247,7 +272,7 @@ static int hmdfs_remote_file_reopen(struct hmdfs_inode_info *info,
 	 */
 	if (fid.id != HMDFS_INODE_INVALID_FILE_ID)
 		hmdfs_send_close(conn, &fid);
-	err = hmdfs_do_open_remote(filp, true);
+	err = hmdfs_do_open_remote(inode, filp, true);
 	inode_unlock(inode);
 
 	spin_lock(&info->fid_lock);
@@ -337,10 +362,43 @@ int hmdfs_file_open_remote(struct inode *inode, struct file *file)
 	int err = 0;
 
 	inode_lock(inode);
+	
+	// NB: we only consider small file (size <= 1 KiB) here, otherwise we may need handle reading uncached pages when the file is not actually opened
 	if (kref_read(ref) == 0) {
-		err = hmdfs_do_open_remote(file, false);
-		if (err == 0)
-			kref_init(ref);
+		// If the file is opened with intent to be modified, then we must communicate with the file holder
+		if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+			if (info->need_reopen) {
+				err = hmdfs_do_open_remote(inode, file, false);
+				if (err >= 0) {
+					kref_init(ref);
+					info->need_reopen = err == EOPNOTSUPP ? true : false;
+					err = 0;
+				}
+			} else {
+				if (info->writecache_expire && hmdfs_remote_write_cache_expired(info)) {
+					// different from above situation, here we set writecache_expire to 0, and truncate the inode page
+					// because we can omit the repeated judgement in hmdfs_open_final_remote
+					info->writecache_expire = 0;
+					truncate_inode_pages(inode->i_mapping, 0);
+					err = hmdfs_do_open_remote(inode, file, false);
+					if (err >= 0) {
+						kref_init(ref);
+						info->need_reopen = err == EOPNOTSUPP ? true : false;
+						err = 0;
+					}
+				} else {
+					atomic64_set(&info->write_counter, 0);
+					info->getattr_isize = HMDFS_STALE_REMOTE_ISIZE;
+				}
+			}
+		} else {
+			err = hmdfs_do_open_remote(inode, file, false);
+			if (err >= 0) {
+				kref_init(ref);
+				info->need_reopen = err == EOPNOTSUPP ? true : false;
+				err = 0;
+			}
+		}
 	} else {
 		kref_get(ref);
 	}
@@ -426,7 +484,9 @@ int hmdfs_file_release_remote(struct inode *inode, struct file *file)
 		hmdfs_remote_del_wr_opened_inode(info->conn, info);
 
 	inode_lock(inode);
-	kref_put(&info->ref, hmdfs_do_close_remote);
+	if (kref_read(&info->ref) > 0)
+ 	 	kref_put(&info->ref, hmdfs_do_close_remote);
+
 	hmdfs_remote_keep_writecache(inode, file);
 	inode_unlock(inode);
 

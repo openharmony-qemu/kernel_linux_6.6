@@ -13,6 +13,8 @@
 #include <linux/workqueue.h>
 #include <linux/namei.h>
 
+#define HMDFS_PREFETCH_FLAG 00000001
+
 struct hmdfs_cmd {
 	__u8 reserved;
 	__u8 cmd_flag;
@@ -20,8 +22,20 @@ struct hmdfs_cmd {
 	__u8 reserved2;
 } __packed;
 
+static inline bool hm_isprefetch(__u8 flag)
+{
+	return (flag & HMDFS_PREFETCH_FLAG) == HMDFS_PREFETCH_FLAG;
+}
+
+static inline void hm_setprefetch(__u8 *flag)
+{
+	*flag |= HMDFS_PREFETCH_FLAG;
+}
+
 #define HMDFS_MSG_MAGIC	      0xF7
 #define HMDFS_MAX_MESSAGE_LEN (8 * 1024 * 1024)
+
+#define HMDFS_PAGE_SIZE 4096
 
 struct hmdfs_head_cmd {
 	__u8 magic;
@@ -181,6 +195,7 @@ enum FILE_CMD {
 	F_RESERVED_7 = 26,
 	F_RESERVED_8 = 27,
 	F_ATOMIC_OPEN = 28,
+	F_DROP_PAGE_PUSH = 29,
 	F_SIZE,
 };
 
@@ -204,6 +219,8 @@ struct open_response {
 	__le64 stable_ctime;
 	__le32 stable_ctime_nsec;
 	__le64 ichange_count;
+	__u8 read_success;
+ 	__u8 page[HMDFS_PAGE_SIZE];
 } __packed;
 
 enum hmdfs_open_flags {
@@ -330,6 +347,18 @@ struct rename_request {
 struct drop_push_request {
 	__le32 path_len;
 	char path[0];
+} __packed;
+
+struct drop_page_push_request {
+	__le64 file_size;
+	__le64 ctime;
+	__le32 ctime_nsec;
+	__le64 mtime;
+	__le32 mtime_nsec;
+	__le64 stable_ctime;
+	__le32 stable_ctime_nsec;
+	__le32 path_len;
+	char buf[0];
 } __packed;
 
 struct setattr_request {

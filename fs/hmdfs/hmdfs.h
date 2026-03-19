@@ -33,7 +33,7 @@
 #define HMDFS_IOC_GET_DST_PATH _IOR(HMDFS_IOC, 3, __u32)
 
 
-#define HMDFS_PAGE_SIZE	  4096
+
 #define HMDFS_PAGE_OFFSET 12
 
 /* max xattr value size, not include '\0' */

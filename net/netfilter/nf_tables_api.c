@@ -10449,7 +10449,6 @@ static int nft_verdict_init(const struct nft_ctx *ctx, struct nft_data *data,
 		switch (data->verdict.code & NF_VERDICT_MASK) {
 		case NF_ACCEPT:
 		case NF_DROP:
-		case NF_QUEUE:
 			break;
 		default:
 			return -EINVAL;

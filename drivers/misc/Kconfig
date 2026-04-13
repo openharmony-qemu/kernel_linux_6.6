@@ -579,4 +579,16 @@ source "drivers/misc/cardreader/Kconfig"
 source "drivers/misc/uacce/Kconfig"
 source "drivers/misc/pvpanic/Kconfig"
 source "drivers/misc/mchp_pci1xxxx/Kconfig"
+
+config NexusLand
+	bool "Nexus Shared Memory Land driver"
+	default n
+	help
+	  Provides a /dev/nexusland misc device that maps a randomised,
+	  slot-based shared-memory region into user-space.  Connections
+	  are allocated via ioctl; a background kthread pre-maps zones
+	  asynchronously.
+
+	  If unsure, say N.
+
 endmenu

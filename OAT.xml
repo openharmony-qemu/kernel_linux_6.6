@@ -626,6 +626,7 @@
 				<filteritem type="filepath" name="drivers/staging/media/av7110/audio-play.rst" desc="shield"/>
 				<filteritem type="filepath" name="drivers/staging/media/av7110/video-fast-forward.rst" desc="shield"/>
 				<filteritem type="filepath" name="drivers/staging/media/av7110/video-set-streamtype.rst" desc="shield"/>
+				<filteritem type="filepath" name="drivers/misc/nexusland.c" desc="shield"/>
             </filefilter>
         </filefilterlist>
     </oatconfig>

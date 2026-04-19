@@ -2867,7 +2867,7 @@ static inline void ptdesc_clear_kernel(struct ptdesc *ptdesc)
 	folio_clear_referenced(ptdesc_folio(ptdesc));
 }
 
-static inline bool ptdesc_test_kernel(const struct ptdesc *ptdesc)
+static inline bool ptdesc_test_kernel(struct ptdesc *ptdesc)
 {
 	return folio_test_referenced(ptdesc_folio(ptdesc));
 }

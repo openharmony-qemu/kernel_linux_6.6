@@ -6727,6 +6727,9 @@ aux_unlock:
 		mutex_unlock(aux_mutex);
 	mutex_unlock(&event->mmap_mutex);
 
+	if (ret)
+		return ret;
+
 	/*
 	 * Since pinned accounting is per vm we cannot allow fork() to copy our
 	 * vma.
@@ -6734,8 +6737,10 @@ aux_unlock:
 	vm_flags_set(vma, VM_DONTCOPY | VM_DONTEXPAND | VM_DONTDUMP);
 	vma->vm_ops = &perf_mmap_vmops;
 
+	if (!ret) {
 	if (event->pmu->event_mapped)
 		event->pmu->event_mapped(event, vma->vm_mm);
+	}
 
 	return ret;
 }

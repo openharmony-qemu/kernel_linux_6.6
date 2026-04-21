@@ -700,6 +700,7 @@ EXPORT_SYMBOL_GPL(usbnet_pause_rx);
 void usbnet_resume_rx(struct usbnet *dev)
 {
 	struct sk_buff *skb;
+	local_bh_disable();
 	int num = 0;
 
 	clear_bit(EVENT_RX_PAUSED, &dev->flags);
@@ -710,6 +711,7 @@ void usbnet_resume_rx(struct usbnet *dev)
 	}
 
 	tasklet_schedule(&dev->bh);
+	local_bh_enable();
 
 	netif_dbg(dev, rx_status, dev->net,
 		  "paused rx queue disabled, %d skbs requeued\n", num);

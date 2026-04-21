@@ -17,7 +17,10 @@
 #define LOONGARCH_BPF_FENTRY_NBYTES (LOONGARCH_LONG_JUMP_NINSNS * 4)
 
 #define REG_TCC		LOONGARCH_GPR_A6
-#define BPF_TAIL_CALL_CNT_PTR_STACK_OFF(stack) (round_up(stack, 16) - 80)
+#define TCC_SAVED	LOONGARCH_GPR_S5
+
+#define SAVE_RA		BIT(0)
+#define SAVE_TCC	BIT(1)
 
 static const int regmap[] = {
 	/* return value from in-kernel function, and exit value for eBPF program */
@@ -39,57 +42,32 @@ static const int regmap[] = {
 	[BPF_REG_AX] = LOONGARCH_GPR_T0,
 };
 
-static void prepare_bpf_tail_call_cnt(struct jit_ctx *ctx, int *store_offset)
+static void mark_call(struct jit_ctx *ctx)
 {
-	const struct bpf_prog *prog = ctx->prog;
-	const bool is_main_prog = !bpf_is_subprog(prog);
+	ctx->flags |= SAVE_RA;
+}
 
-	if (is_main_prog) {
-		/*
-		 * LOONGARCH_GPR_T3 = MAX_TAIL_CALL_CNT
-		 * if (REG_TCC > T3 )
-		 *	std REG_TCC -> LOONGARCH_GPR_SP + store_offset
-		 * else
-		 *	std REG_TCC -> LOONGARCH_GPR_SP + store_offset
-		 *	REG_TCC = LOONGARCH_GPR_SP + store_offset
-		 *
-		 * std REG_TCC -> LOONGARCH_GPR_SP + store_offset
-		 *
-		 * The purpose of this code is to first push the TCC into stack,
-		 * and then push the address of TCC into stack.
-		 * In cases where bpf2bpf and tailcall are used in combination,
-		 * the value in REG_TCC may be a count or an address,
-		 * these two cases need to be judged and handled separately.
-		 */
-		emit_insn(ctx, addid, LOONGARCH_GPR_T3, LOONGARCH_GPR_ZERO, MAX_TAIL_CALL_CNT);
-		*store_offset -= sizeof(long);
+static void mark_tail_call(struct jit_ctx *ctx)
+{
+	ctx->flags |= SAVE_TCC;
+}
 
-		emit_cond_jmp(ctx, BPF_JGT, REG_TCC, LOONGARCH_GPR_T3, 4);
+static bool seen_call(struct jit_ctx *ctx)
+{
+	return (ctx->flags & SAVE_RA);
+}
 
-		/*
-		 * If REG_TCC < MAX_TAIL_CALL_CNT, the value in REG_TCC is a count,
-		 * push tcc into stack
-		 */
-		emit_insn(ctx, std, REG_TCC, LOONGARCH_GPR_SP, *store_offset);
+static bool seen_tail_call(struct jit_ctx *ctx)
+{
+	return (ctx->flags & SAVE_TCC);
+}
 
-		/* Push the address of TCC into the REG_TCC */
-		emit_insn(ctx, addid, REG_TCC, LOONGARCH_GPR_SP, *store_offset);
+static u8 tail_call_reg(struct jit_ctx *ctx)
+{
+	if (seen_call(ctx))
+		return TCC_SAVED;
 
-		emit_uncond_jmp(ctx, 2);
-
-		/*
-		 * If REG_TCC > MAX_TAIL_CALL_CNT, the value in REG_TCC is an address,
-		 * push tcc_ptr into stack
-		 */
-		emit_insn(ctx, std, REG_TCC, LOONGARCH_GPR_SP, *store_offset);
-	} else {
-		*store_offset -= sizeof(long);
-		emit_insn(ctx, std, REG_TCC, LOONGARCH_GPR_SP, *store_offset);
-	}
-
-	/* Push tcc_ptr into stack */
-	*store_offset -= sizeof(long);
-	emit_insn(ctx, std, REG_TCC, LOONGARCH_GPR_SP, *store_offset);
+	return REG_TCC;
 }
 
 /*
@@ -112,10 +90,6 @@ static void prepare_bpf_tail_call_cnt(struct jit_ctx *ctx, int *store_offset)
  *                            |           $s4           |
  *                            +-------------------------+
  *                            |           $s5           |
- *                            +-------------------------+
- *                            |           tcc           |
- *                            +-------------------------+
- *                            |           tcc_ptr       |
  *                            +-------------------------+ <--BPF_REG_FP
  *                            |  prog->aux->stack_depth |
  *                            |        (optional)       |
@@ -125,16 +99,11 @@ static void prepare_bpf_tail_call_cnt(struct jit_ctx *ctx, int *store_offset)
 static void build_prologue(struct jit_ctx *ctx)
 {
 	int i, stack_adjust = 0, store_offset, bpf_stack_adjust;
-	const struct bpf_prog *prog = ctx->prog;
-	const bool is_main_prog = !bpf_is_subprog(prog);
 
 	bpf_stack_adjust = round_up(ctx->prog->aux->stack_depth, 16);
 
-	/* To store ra, fp, s0, s1, s2, s3, s4, s5 */
+	/* To store ra, fp, s0, s1, s2, s3, s4 and s5. */
 	stack_adjust += sizeof(long) * 8;
-
-	/* To store tcc and tcc_ptr */
-	stack_adjust += sizeof(long) * 2;
 
 	stack_adjust = round_up(stack_adjust, 16);
 	stack_adjust += bpf_stack_adjust;
@@ -144,12 +113,11 @@ static void build_prologue(struct jit_ctx *ctx)
 		emit_insn(ctx, nop);
 
 	/*
-	 * First instruction initializes the tail call count (TCC)
-	 * register to zero. On tail call we skip this instruction,
-	 * and the TCC is passed in REG_TCC from the caller.
+	 * First instruction initializes the tail call count (TCC).
+	 * On tail call we skip this instruction, and the TCC is
+	 * passed in REG_TCC from the caller.
 	 */
-	if (is_main_prog)
-		emit_insn(ctx, addid, REG_TCC, LOONGARCH_GPR_ZERO, 0);
+	emit_insn(ctx, addid, REG_TCC, LOONGARCH_GPR_ZERO, MAX_TAIL_CALL_CNT);
 
 	emit_insn(ctx, addid, LOONGARCH_GPR_SP, LOONGARCH_GPR_SP, -stack_adjust);
 
@@ -177,12 +145,19 @@ static void build_prologue(struct jit_ctx *ctx)
 	store_offset -= sizeof(long);
 	emit_insn(ctx, std, LOONGARCH_GPR_S5, LOONGARCH_GPR_SP, store_offset);
 
-	prepare_bpf_tail_call_cnt(ctx, &store_offset);
-
 	emit_insn(ctx, addid, LOONGARCH_GPR_FP, LOONGARCH_GPR_SP, stack_adjust);
 
 	if (bpf_stack_adjust)
 		emit_insn(ctx, addid, regmap[BPF_REG_FP], LOONGARCH_GPR_SP, bpf_stack_adjust);
+
+	/*
+	 * Program contains calls and tail calls, so REG_TCC need
+	 * to be saved across calls.
+	 */
+	if (seen_tail_call(ctx) && seen_call(ctx))
+		move_reg(ctx, TCC_SAVED, REG_TCC);
+	else
+		emit_insn(ctx, nop);
 
 	ctx->stack_size = stack_adjust;
 }
@@ -216,16 +191,6 @@ static void __build_epilogue(struct jit_ctx *ctx, bool is_tail_call)
 	load_offset -= sizeof(long);
 	emit_insn(ctx, ldd, LOONGARCH_GPR_S5, LOONGARCH_GPR_SP, load_offset);
 
-	/*
-	 * When push into the stack, follow the order of tcc then tcc_ptr.
-	 * When pop from the stack, first pop tcc_ptr then followed by tcc.
-	 */
-	load_offset -= 2 * sizeof(long);
-	emit_insn(ctx, ldd, REG_TCC, LOONGARCH_GPR_SP, load_offset);
-
-	load_offset += sizeof(long);
-	emit_insn(ctx, ldd, REG_TCC, LOONGARCH_GPR_SP, load_offset);
-
 	emit_insn(ctx, addid, LOONGARCH_GPR_SP, LOONGARCH_GPR_SP, stack_adjust);
 
 	if (!is_tail_call) {
@@ -238,7 +203,7 @@ static void __build_epilogue(struct jit_ctx *ctx, bool is_tail_call)
 		 * Call the next bpf prog and skip the first instruction
 		 * of TCC initialization.
 		 */
-		emit_insn(ctx, jirl, LOONGARCH_GPR_ZERO, LOONGARCH_GPR_T3, 6);
+		emit_insn(ctx, jirl, LOONGARCH_GPR_ZERO, LOONGARCH_GPR_T3, 1);
 	}
 }
 
@@ -260,7 +225,7 @@ bool bpf_jit_supports_far_kfunc_call(void)
 static int emit_bpf_tail_call(struct jit_ctx *ctx, int insn)
 {
 	int off, tc_ninsn = 0;
-	int tcc_ptr_off = BPF_TAIL_CALL_CNT_PTR_STACK_OFF(ctx->stack_size);
+	u8 tcc = tail_call_reg(ctx);
 	u8 a1 = LOONGARCH_GPR_A1;
 	u8 a2 = LOONGARCH_GPR_A2;
 	u8 t1 = LOONGARCH_GPR_T1;
@@ -287,15 +252,11 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx, int insn)
 		goto toofar;
 
 	/*
-	 * if ((*tcc_ptr)++ >= MAX_TAIL_CALL_CNT)
-	 *      goto out;
+	 * if (--TCC < 0)
+	 *	 goto out;
 	 */
-	emit_insn(ctx, ldd, REG_TCC, LOONGARCH_GPR_SP, tcc_ptr_off);
-	emit_insn(ctx, ldd, t3, REG_TCC, 0);
-	emit_insn(ctx, addid, t3, t3, 1);
-	emit_insn(ctx, std, t3, REG_TCC, 0);
-	emit_insn(ctx, addid, t2, LOONGARCH_GPR_ZERO, MAX_TAIL_CALL_CNT);
-	if (emit_tailcall_jmp(ctx, BPF_JSGT, t3, t2, jmp_offset) < 0)
+	emit_insn(ctx, addid, REG_TCC, tcc, -1);
+	if (emit_tailcall_jmp(ctx, BPF_JSLT, REG_TCC, LOONGARCH_GPR_ZERO, jmp_offset) < 0)
 		goto toofar;
 
 	/*
@@ -506,7 +467,7 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx, bool ext
 	u64 func_addr;
 	bool func_addr_fixed, sign_extend;
 	int i = insn - ctx->prog->insnsi;
-	int ret, jmp_offset, tcc_ptr_off;
+	int ret, jmp_offset;
 	const u8 code = insn->code;
 	const u8 cond = BPF_OP(code);
 	const u8 t1 = LOONGARCH_GPR_T1;
@@ -527,11 +488,13 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx, bool ext
 			emit_zext_32(ctx, dst, is32);
 			break;
 		case 8:
-			emit_insn(ctx, extwb, dst, src);
+			move_reg(ctx, t1, src);
+			emit_insn(ctx, extwb, dst, t1);
 			emit_zext_32(ctx, dst, is32);
 			break;
 		case 16:
-			emit_insn(ctx, extwh, dst, src);
+			move_reg(ctx, t1, src);
+			emit_insn(ctx, extwh, dst, t1);
 			emit_zext_32(ctx, dst, is32);
 			break;
 		case 32:
@@ -940,31 +903,11 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx, bool ext
 
 	/* function call */
 	case BPF_JMP | BPF_CALL:
+		mark_call(ctx);
 		ret = bpf_jit_get_func_addr(ctx->prog, insn, extra_pass,
 					    &func_addr, &func_addr_fixed);
 		if (ret < 0)
 			return ret;
-
-		if (insn->src_reg == BPF_PSEUDO_CALL) {
-			tcc_ptr_off = BPF_TAIL_CALL_CNT_PTR_STACK_OFF(ctx->stack_size);
-			emit_insn(ctx, ldd, REG_TCC, LOONGARCH_GPR_SP, tcc_ptr_off);
-		}
-
-		if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL) {
-			const struct btf_func_model *m;
-			int i;
-
-			m = bpf_jit_find_kfunc_model(ctx->prog, insn);
-			if (!m)
-				return -EINVAL;
-
-			for (i = 0; i < m->nr_args; i++) {
-				u8 reg = regmap[BPF_REG_1 + i];
-				bool sign = m->arg_flags[i] & BTF_FMODEL_SIGNED_ARG;
-
-				emit_abi_ext(ctx, reg, m->arg_size[i], sign);
-			}
-		}
 
 		move_addr(ctx, t1, func_addr);
 		emit_insn(ctx, jirl, LOONGARCH_GPR_RA, t1, 0);
@@ -976,6 +919,7 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx, bool ext
 
 	/* tail call */
 	case BPF_JMP | BPF_TAIL_CALL:
+		mark_tail_call(ctx);
 		if (emit_bpf_tail_call(ctx, i) < 0)
 			return -EINVAL;
 		break;
@@ -1300,22 +1244,18 @@ void *bpf_arch_text_copy(void *dst, void *src, size_t len)
 	return ret ? ERR_PTR(-EINVAL) : dst;
 }
 
-int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
-		       enum bpf_text_poke_type new_t, void *old_addr,
-		       void *new_addr)
+int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type poke_type,
+		       void *old_addr, void *new_addr)
 {
 	int ret;
-	bool is_call;
+	bool is_call = (poke_type == BPF_MOD_CALL);
 	u32 old_insns[LOONGARCH_LONG_JUMP_NINSNS] = {[0 ... 4] = INSN_NOP};
 	u32 new_insns[LOONGARCH_LONG_JUMP_NINSNS] = {[0 ... 4] = INSN_NOP};
 
-	/* Only poking bpf text is supported. Since kernel function entry
-	 * is set up by ftrace, we rely on ftrace to poke kernel functions.
-	 */
-	if (!is_bpf_text_address((unsigned long)ip))
+	if (!is_kernel_text((unsigned long)ip) &&
+		!is_bpf_text_address((unsigned long)ip))
 		return -ENOTSUPP;
 
-	is_call = old_t == BPF_MOD_CALL;
 	ret = emit_jump_or_nops(old_addr, ip, old_insns, is_call);
 	if (ret)
 		return ret;
@@ -1323,7 +1263,6 @@ int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 	if (memcmp(ip, old_insns, LOONGARCH_LONG_JUMP_NBYTES))
 		return -EFAULT;
 
-	is_call = new_t == BPF_MOD_CALL;
 	ret = emit_jump_or_nops(new_addr, ip, new_insns, is_call);
 	if (ret)
 		return ret;
@@ -1467,50 +1406,22 @@ void arch_free_bpf_trampoline(void *image, unsigned int size)
 	bpf_prog_pack_free(image, size);
 }
 
-/*
- * Sign-extend the register if necessary
- */
-static void sign_extend(struct jit_ctx *ctx, int rd, int rj, u8 size, bool sign)
-{
-	/* ABI requires unsigned char/short to be zero-extended */
-	if (!sign && (size == 1 || size == 2)) {
-		if (rd != rj)
-			move_reg(ctx, rd, rj);
-		return;
-	}
-
-	switch (size) {
-	case 1:
-		emit_insn(ctx, extwb, rd, rj);
-		break;
-	case 2:
-		emit_insn(ctx, extwh, rd, rj);
-		break;
-	case 4:
-		emit_insn(ctx, addiw, rd, rj, 0);
-		break;
-	case 8:
-		if (rd != rj)
-			move_reg(ctx, rd, rj);
-		break;
-	default:
-		pr_warn("bpf_jit: invalid size %d for sign_extend\n", size);
-	}
-}
-
 static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 					 const struct btf_func_model *m, struct bpf_tramp_links *tlinks,
 					 void *func_addr, u32 flags)
 {
 	int i, ret, save_ret;
-	int stack_size, nargs;
-	int retval_off, args_off, nargs_off, ip_off, run_ctx_off, sreg_off, tcc_ptr_off;
+	int stack_size = 0, nargs = 0;
+	int retval_off, args_off, nargs_off, ip_off, run_ctx_off, sreg_off;
 	bool is_struct_ops = flags & BPF_TRAMP_F_INDIRECT;
 	void *orig_call = func_addr;
 	struct bpf_tramp_links *fentry = &tlinks[BPF_TRAMP_FENTRY];
 	struct bpf_tramp_links *fexit = &tlinks[BPF_TRAMP_FEXIT];
 	struct bpf_tramp_links *fmod_ret = &tlinks[BPF_TRAMP_MODIFY_RETURN];
 	u32 **branches = NULL;
+
+	if (flags & (BPF_TRAMP_F_ORIG_STACK | BPF_TRAMP_F_SHARE_IPMODIFY))
+		return -ENOTSUPP;
 
 	/*
 	 * FP + 8       [ RA to parent func ] return address to parent
@@ -1536,29 +1447,25 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 	 *
 	 * FP - sreg_off    [ callee saved reg  ]
 	 *
-	 * FP - tcc_ptr_off [ tail_call_cnt_ptr ]
 	 */
 
 	if (m->nr_args > LOONGARCH_MAX_REG_ARGS)
 		return -ENOTSUPP;
 
-	/* FIXME: No support of struct argument */
-	for (i = 0; i < m->nr_args; i++) {
-		if (m->arg_flags[i] & BTF_FMODEL_STRUCT_ARG)
-			return -ENOTSUPP;
-	}
-
 	if (flags & (BPF_TRAMP_F_ORIG_STACK | BPF_TRAMP_F_SHARE_IPMODIFY))
 		return -ENOTSUPP;
 
+	stack_size = 0;
+
 	/* Room of trampoline frame to store return address and frame pointer */
-	stack_size = 16;
+	stack_size += 16;
 
 	save_ret = flags & (BPF_TRAMP_F_CALL_ORIG | BPF_TRAMP_F_RET_FENTRY_RET);
-	if (save_ret)
-		stack_size += 16; /* Save BPF R0 and A0 */
-
-	retval_off = stack_size;
+	if (save_ret) {
+		/* Save BPF R0 and A0 */
+		stack_size += 16;
+		retval_off = stack_size;
+	}
 
 	/* Room of trampoline frame to store args */
 	nargs = m->nr_args;
@@ -1581,12 +1488,6 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 
 	stack_size += 8;
 	sreg_off = stack_size;
-
-	/* Room of trampoline frame to store tail_call_cnt_ptr */
-	if (flags & BPF_TRAMP_F_TAIL_CALL_CTX) {
-		stack_size += 8;
-		tcc_ptr_off = stack_size;
-	}
 
 	stack_size = round_up(stack_size, 16);
 
@@ -1618,9 +1519,6 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 		emit_insn(ctx, addid, LOONGARCH_GPR_FP, LOONGARCH_GPR_SP, stack_size);
 	}
 
-	if (flags & BPF_TRAMP_F_TAIL_CALL_CTX)
-		emit_insn(ctx, std, REG_TCC, LOONGARCH_GPR_FP, -tcc_ptr_off);
-
 	/* callee saved register S1 to pass start time */
 	emit_insn(ctx, std, LOONGARCH_GPR_S1, LOONGARCH_GPR_FP, -sreg_off);
 
@@ -1643,12 +1541,9 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 	/* Direct jump skips 5 NOP instructions */
 	else if (is_bpf_text_address((unsigned long)orig_call))
 		orig_call += LOONGARCH_BPF_FENTRY_NBYTES;
-	/* Module tracing not supported - cause kernel lockups */
-	else if (is_module_text_address((unsigned long)orig_call))
-		return -ENOTSUPP;
 
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
-		move_addr(ctx, LOONGARCH_GPR_A0, (const u64)im);
+		move_imm(ctx, LOONGARCH_GPR_A0, (const s64)im, false);
 		ret = emit_call(ctx, (const u64)__bpf_tramp_enter);
 		if (ret)
 			return ret;
@@ -1670,10 +1565,6 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
 		restore_args(ctx, m->nr_args, args_off);
-
-		if (flags & BPF_TRAMP_F_TAIL_CALL_CTX)
-			emit_insn(ctx, ldd, REG_TCC, LOONGARCH_GPR_FP, -tcc_ptr_off);
-
 		ret = emit_call(ctx, (const u64)orig_call);
 		if (ret)
 			goto out;
@@ -1698,7 +1589,7 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 
 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
 		im->ip_epilogue = ctx->ro_image + ctx->idx;
-		move_addr(ctx, LOONGARCH_GPR_A0, (const u64)im);
+		move_imm(ctx, LOONGARCH_GPR_A0, (const s64)im, false);
 		ret = emit_call(ctx, (const u64)__bpf_tramp_exit);
 		if (ret)
 			goto out;
@@ -1708,18 +1599,11 @@ static int __arch_prepare_bpf_trampoline(struct jit_ctx *ctx, struct bpf_tramp_i
 		restore_args(ctx, m->nr_args, args_off);
 
 	if (save_ret) {
+		emit_insn(ctx, ldd, LOONGARCH_GPR_A0, LOONGARCH_GPR_FP, -retval_off);
 		emit_insn(ctx, ldd, regmap[BPF_REG_0], LOONGARCH_GPR_FP, -(retval_off - 8));
-		if (is_struct_ops)
-			sign_extend(ctx, LOONGARCH_GPR_A0, regmap[BPF_REG_0],
-				    m->ret_size, m->ret_flags & BTF_FMODEL_SIGNED_ARG);
-		else
-			emit_insn(ctx, ldd, LOONGARCH_GPR_A0, LOONGARCH_GPR_FP, -retval_off);
 	}
 
 	emit_insn(ctx, ldd, LOONGARCH_GPR_S1, LOONGARCH_GPR_FP, -sreg_off);
-
-	if (flags & BPF_TRAMP_F_TAIL_CALL_CTX)
-		emit_insn(ctx, ldd, REG_TCC, LOONGARCH_GPR_FP, -tcc_ptr_off);
 
 	if (is_struct_ops) {
 		/* trampoline called directly */
@@ -1772,10 +1656,7 @@ int arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *ro_image,
 
 	jit_fill_hole(image, (unsigned int)(ro_image_end - ro_image));
 	ret = __arch_prepare_bpf_trampoline(&ctx, im, m, tlinks, func_addr, flags);
-	if (ret < 0)
-		goto out;
-
-	if (validate_code(&ctx) < 0) {
+	if (ret > 0 && validate_code(&ctx) < 0) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -1786,6 +1667,7 @@ int arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *ro_image,
 		goto out;
 	}
 
+	bpf_flush_icache(ro_image, ro_image_end);
 out:
 	kvfree(image);
 	return ret < 0 ? ret : size;
@@ -1803,7 +1685,8 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 
 	ret = __arch_prepare_bpf_trampoline(&ctx, &im, m, tlinks, func_addr, flags);
 
-	return ret < 0 ? ret : ret * LOONGARCH_INSN_SIZE;
+	/* Page align */
+	return ret < 0 ? ret : round_up(ret * LOONGARCH_INSN_SIZE, PAGE_SIZE);
 }
 
 struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
@@ -1971,16 +1854,6 @@ out_free:
 	prog->jited = 0;
 	prog->jited_len = 0;
 	goto out_offset;
-}
-
-bool bpf_jit_bypass_spec_v1(void)
-{
-	return true;
-}
-
-bool bpf_jit_bypass_spec_v4(void)
-{
-	return true;
 }
 
 /* Indicate the JIT backend supports mixing bpf2bpf and tailcalls. */

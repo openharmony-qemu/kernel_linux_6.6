@@ -2857,6 +2857,21 @@ static inline bool pagetable_is_reserved(struct ptdesc *pt)
 	return folio_test_reserved(ptdesc_folio(pt));
 }
 
+static inline void ptdesc_set_kernel(struct ptdesc *ptdesc)
+{
+	folio_set_referenced(ptdesc_folio(ptdesc));
+}
+
+static inline void ptdesc_clear_kernel(struct ptdesc *ptdesc)
+{
+	folio_clear_referenced(ptdesc_folio(ptdesc));
+}
+
+static inline bool ptdesc_test_kernel(struct ptdesc *ptdesc)
+{
+	return folio_test_referenced(ptdesc_folio(ptdesc));
+}
+
 /**
  * pagetable_alloc - Allocate pagetables
  * @gfp:    GFP flags
@@ -2874,6 +2889,22 @@ static inline struct ptdesc *pagetable_alloc(gfp_t gfp, unsigned int order)
 	return page_ptdesc(page);
 }
 
+static inline void __pagetable_free(struct ptdesc *pt)
+{
+	struct page *page = ptdesc_page(pt);
+
+	__free_pages(page, compound_order(page));
+}
+
+#ifdef CONFIG_ASYNC_KERNEL_PGTABLE_FREE
+void pagetable_free_kernel(struct ptdesc *pt);
+#else
+static inline void pagetable_free_kernel(struct ptdesc *pt)
+{
+	__pagetable_free(pt);
+}
+#endif
+
 /**
  * pagetable_free - Free pagetables
  * @pt:	The page table descriptor
@@ -2883,9 +2914,12 @@ static inline struct ptdesc *pagetable_alloc(gfp_t gfp, unsigned int order)
  */
 static inline void pagetable_free(struct ptdesc *pt)
 {
-	struct page *page = ptdesc_page(pt);
-
-	__free_pages(page, compound_order(page));
+	if (ptdesc_test_kernel(pt)) {
+		ptdesc_clear_kernel(pt);
+		pagetable_free_kernel(pt);
+	} else {
+		__pagetable_free(pt);
+	}
 }
 
 #if USE_SPLIT_PTE_PTLOCKS

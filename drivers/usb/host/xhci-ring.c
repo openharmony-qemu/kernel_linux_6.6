@@ -242,12 +242,10 @@ static void inc_enq(struct xhci_hcd *xhci, struct xhci_ring *ring,
 			break;
 
 		/* If we're not dealing with 0.95 hardware or isoc rings on
-		 * AMD 0.96 host, carry over the chain bit of the previous TRB
+		 * AMD/NEC 0.96 hosts, carry over the chain bit of the previous TRB
 		 * (which may mean the chain bit is cleared).
 		 */
-		if (!(ring->type == TYPE_ISOC &&
-		      (xhci->quirks & XHCI_AMD_0x96_HOST)) &&
-		    !xhci_link_trb_quirk(xhci)) {
+		if (!xhci_link_chain_quirk(xhci, ring->type)) {
 			next->link.control &= cpu_to_le32(~TRB_CHAIN);
 			next->link.control |= cpu_to_le32(chain);
 		}
@@ -3374,11 +3372,9 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 
 	while (trb_is_link(ep_ring->enqueue)) {
 		/* If we're not dealing with 0.95 hardware or isoc rings
-		 * on AMD 0.96 host, clear the chain bit.
+		 * on AMD/NEC 0.96 hosts, clear the chain bit.
 		 */
-		if (!xhci_link_trb_quirk(xhci) &&
-		    !(ep_ring->type == TYPE_ISOC &&
-		      (xhci->quirks & XHCI_AMD_0x96_HOST)))
+		if (!xhci_link_chain_quirk(xhci, ep_ring->type))
 			ep_ring->enqueue->link.control &=
 				cpu_to_le32(~TRB_CHAIN);
 		else

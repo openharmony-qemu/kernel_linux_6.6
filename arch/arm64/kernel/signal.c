@@ -465,6 +465,10 @@ static int restore_za_context(struct user_ctxs *user)
 	if (user->za_size < ZA_SIG_CONTEXT_SIZE(vq))
 		return -EINVAL;
 
+	sve_alloc(current, false);
+	if (!current->thread.sve_state)
+		return -ENOMEM;
+
 	/*
 	 * Careful: we are about __copy_from_user() directly into
 	 * thread.sme_state with preemption enabled, so protection is

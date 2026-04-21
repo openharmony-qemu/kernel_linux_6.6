@@ -247,6 +247,8 @@ static int preallocate_pmds(struct mm_struct *mm, pmd_t *pmds[], int count)
 			failed = true;
 		}
 		if (ptdesc) {
+			if (mm == &init_mm)
+				ptdesc_set_kernel(ptdesc);
 			mm_inc_nr_pmds(mm);
 			pmd = ptdesc_address(ptdesc);
 		}

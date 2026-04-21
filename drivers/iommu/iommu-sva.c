@@ -3,6 +3,7 @@
  * Helpers for IOMMU drivers implementing SVA
  */
 #include <linux/mmu_context.h>
+#include <linux/mmu_notifier.h>
 #include <linux/mutex.h>
 #include <linux/sched/mm.h>
 #include <linux/iommu.h>
@@ -10,6 +11,8 @@
 #include "iommu-sva.h"
 
 static DEFINE_MUTEX(iommu_sva_lock);
+static bool iommu_sva_present;
+static LIST_HEAD(iommu_sva_domains);
 
 /* Allocate a PASID for the mm within range (inclusive) */
 static int iommu_sva_alloc_pasid(struct mm_struct *mm, struct device *dev)
@@ -96,6 +99,10 @@ struct iommu_sva *iommu_sva_bind_device(struct device *dev, struct mm_struct *mm
 	if (ret)
 		goto out_free_domain;
 	domain->users = 1;
+
+	if (list_empty(&iommu_sva_domains))
+		iommu_sva_present = true;
+	list_add(&domain->next, &iommu_sva_domains);
 out:
 	mutex_unlock(&iommu_sva_lock);
 	handle->dev = dev;
@@ -130,6 +137,9 @@ void iommu_sva_unbind_device(struct iommu_sva *handle)
 	mutex_lock(&iommu_sva_lock);
 	if (--domain->users == 0) {
 		iommu_detach_device_pasid(domain, dev, pasid);
+		list_del(&domain->next);
+		if (list_empty(&iommu_sva_domains))
+			iommu_sva_present = false;
 		iommu_domain_free(domain);
 	}
 	mutex_unlock(&iommu_sva_lock);
@@ -209,4 +219,17 @@ void mm_pasid_drop(struct mm_struct *mm)
 		return;
 
 	iommu_free_global_pasid(mm->pasid);
+}
+
+void iommu_sva_invalidate_kva_range(unsigned long start, unsigned long end)
+{
+	struct iommu_domain *domain;
+
+	mutex_lock(&iommu_sva_lock);
+	if (iommu_sva_present) {
+		list_for_each_entry(domain, &iommu_sva_domains, next)
+			mmu_notifier_arch_invalidate_secondary_tlbs(domain->mm,
+								    start, end);
+	}
+	mutex_unlock(&iommu_sva_lock);
 }

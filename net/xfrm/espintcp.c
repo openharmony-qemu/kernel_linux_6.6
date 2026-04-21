@@ -534,7 +534,12 @@ static void espintcp_close(struct sock *sk, long timeout)
 	sk->sk_prot = &tcp_prot;
 	barrier();
 
-	disable_work_sync(&ctx->work);
+	/*
+	 * stable-6.6.100 switched this path to disable_work_sync() to block
+	 * requeue races, but this tree doesn't carry the workqueue API yet.
+	 * Fall back to the strongest available synchronous cancellation here.
+	 */
+	cancel_work_sync(&ctx->work);
 	strp_done(&ctx->strp);
 
 	skb_queue_purge(&ctx->out_queue);

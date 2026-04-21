@@ -13,7 +13,6 @@
 #include <linux/seq_file.h>
 #include <linux/exportfs.h>
 
-#include "../internal.h"
 #include "inotify/inotify.h"
 #include "fanotify/fanotify.h"
 #include "fdinfo.h"

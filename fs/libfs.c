@@ -389,20 +389,36 @@ int simple_offset_rename_exchange(struct inode *old_dir,
 	if (WARN_ON(!old_index || !new_index))
 		return -EINVAL;
 
-	ret = mtree_store(&new_ctx->mt, new_index, old_dentry, GFP_KERNEL);
-	if (WARN_ON(ret))
-		return ret;
+	/*
+	 * stable-6.6.119 switched shmem directory offsets over to maple tree
+	 * updates here. This tree still stores offsets in struct xarray, so
+	 * keep the equivalent replace-and-rollback flow.
+	 */
+	simple_offset_remove(old_ctx, old_dentry);
+	simple_offset_remove(new_ctx, new_dentry);
 
-	ret = mtree_store(&old_ctx->mt, old_index, new_dentry, GFP_KERNEL);
-	if (WARN_ON(ret)) {
-		mtree_store(&new_ctx->mt, new_index, new_dentry, GFP_KERNEL);
-		return ret;
+	ret = simple_offset_replace(new_ctx, old_dentry, new_index);
+	if (ret)
+		goto out_restore;
+
+	ret = simple_offset_replace(old_ctx, new_dentry, old_index);
+	if (ret) {
+		simple_offset_remove(new_ctx, old_dentry);
+		goto out_restore;
 	}
 
-	offset_set(old_dentry, new_index);
-	offset_set(new_dentry, old_index);
-	simple_rename_exchange(old_dir, old_dentry, new_dir, new_dentry);
+	ret = simple_rename_exchange(old_dir, old_dentry, new_dir, new_dentry);
+	if (ret) {
+		simple_offset_remove(new_ctx, old_dentry);
+		simple_offset_remove(old_ctx, new_dentry);
+		goto out_restore;
+	}
 	return 0;
+
+out_restore:
+	(void)simple_offset_replace(old_ctx, old_dentry, old_index);
+	(void)simple_offset_replace(new_ctx, new_dentry, new_index);
+	return ret;
 }
 
 /**

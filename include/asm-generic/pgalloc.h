@@ -23,7 +23,6 @@ static inline pte_t *__pte_alloc_one_kernel(struct mm_struct *mm)
 
 	if (!ptdesc)
 		return NULL;
-	ptdesc_set_kernel(ptdesc);
 	return ptdesc_address(ptdesc);
 }
 
@@ -139,8 +138,6 @@ static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 		pagetable_free(ptdesc);
 		return NULL;
 	}
-	if (mm == &init_mm)
-		ptdesc_set_kernel(ptdesc);
 	return ptdesc_address(ptdesc);
 }
 #endif
@@ -172,8 +169,6 @@ static inline pud_t *__pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 	ptdesc = pagetable_alloc(gfp, 0);
 	if (!ptdesc)
 		return NULL;
-	if (mm == &init_mm)
-		ptdesc_set_kernel(ptdesc);
 	return ptdesc_address(ptdesc);
 }
 

@@ -1351,9 +1351,6 @@ config LRU_GEN_STATS
 config ARCH_SUPPORTS_PER_VMA_LOCK
        def_bool n
 
-config ASYNC_KERNEL_PGTABLE_FREE
-	def_bool n
-
 config PER_VMA_LOCK
 	def_bool y
 	depends on ARCH_SUPPORTS_PER_VMA_LOCK && MMU && SMP

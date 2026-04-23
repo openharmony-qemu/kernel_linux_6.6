@@ -458,9 +458,7 @@ static loff_t offset_dir_llseek(struct file *file, loff_t offset, int whence)
 		return -EINVAL;
 	}
 
-	/* In this case, ->private_data is protected by f_pos_lock */
-	file->private_data = NULL;
-	return vfs_setpos(file, offset, LONG_MAX);
+	return vfs_setpos(file, offset, U32_MAX);
 }
 
 static struct dentry *find_positive_dentry(struct dentry *parent,

@@ -317,6 +317,11 @@ static inline struct curseg_info *CURSEG_I(struct f2fs_sb_info *sbi, int type)
 	return (struct curseg_info *)(SM_I(sbi)->curseg_array + type);
 }
 
+static inline bool is_cursec(struct f2fs_sb_info *sbi, unsigned int secno)
+{
+	return IS_CURSEC(sbi, secno);
+}
+
 static inline struct seg_entry *get_seg_entry(struct f2fs_sb_info *sbi,
 						unsigned int segno)
 {

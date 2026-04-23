@@ -452,10 +452,7 @@ out:
 	while (!cfg80211_chandef_usable(sdata->local->hw.wiphy, chandef,
 					tracking ? 0 :
 						   IEEE80211_CHAN_DISABLED)) {
-		if (chandef->width == NL80211_CHAN_WIDTH_20_NOHT) {
-			sdata_info(sdata,
-				   "unusable channel (%d MHz) for connection\n",
-				   chandef->chan->center_freq);
+		if (WARN_ON(chandef->width == NL80211_CHAN_WIDTH_20_NOHT)) {
 			ret = IEEE80211_CONN_DISABLE_HT |
 			      IEEE80211_CONN_DISABLE_VHT |
 			      IEEE80211_CONN_DISABLE_HE |

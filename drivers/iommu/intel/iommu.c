@@ -112,70 +112,6 @@ static inline unsigned long lvl_to_nr_pages(unsigned int lvl)
 	return 1UL << min_t(int, (lvl - 1) * LEVEL_STRIDE, MAX_AGAW_PFN_WIDTH);
 }
 
-static int device_rid_cmp_key(const void *key, const struct rb_node *node)
-{
-	struct device_domain_info *info =
-		rb_entry(node, struct device_domain_info, node);
-	const u16 *rid_lhs = key;
-
-	if (*rid_lhs < PCI_DEVID(info->bus, info->devfn))
-		return -1;
-
-	if (*rid_lhs > PCI_DEVID(info->bus, info->devfn))
-		return 1;
-
-	return 0;
-}
-
-static int device_rid_cmp(struct rb_node *lhs, const struct rb_node *rhs)
-{
-	struct device_domain_info *info =
-		rb_entry(lhs, struct device_domain_info, node);
-	u16 key = PCI_DEVID(info->bus, info->devfn);
-
-	return device_rid_cmp_key(&key, rhs);
-}
-
-struct device *device_rbtree_find(struct intel_iommu *iommu, u16 rid)
-{
-	struct device_domain_info *info = NULL;
-	struct rb_node *node;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);
-	node = rb_find(&rid, &iommu->device_rbtree, device_rid_cmp_key);
-	if (node)
-		info = rb_entry(node, struct device_domain_info, node);
-	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);
-
-	return info ? info->dev : NULL;
-}
-
-static int device_rbtree_insert(struct intel_iommu *iommu,
-				struct device_domain_info *info)
-{
-	struct rb_node *curr;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);
-	curr = rb_find_add(&info->node, &iommu->device_rbtree, device_rid_cmp);
-	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);
-	if (WARN_ON(curr))
-		return -EEXIST;
-
-	return 0;
-}
-
-static void device_rbtree_remove(struct device_domain_info *info)
-{
-	struct intel_iommu *iommu = info->iommu;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);
-	rb_erase(&info->node, &iommu->device_rbtree);
-	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);
-}
-
 /* VT-d pages must always be _smaller_ than MM pages. Otherwise things
    are never going to work. */
 static inline unsigned long mm_to_dma_pfn_start(unsigned long mm_pfn)
@@ -4480,36 +4416,24 @@ static struct iommu_device *intel_iommu_probe_device(struct device *dev)
 	}
 
 	dev_iommu_priv_set(dev, info);
-	ret = device_rbtree_insert(iommu, info);
-	if (ret)
-		goto free;
 
 	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev)) {
 		ret = intel_pasid_alloc_table(dev);
 		if (ret) {
 			dev_err(dev, "PASID table allocation failed\n");
-			goto clear_rbtree;
+			dev_iommu_priv_set(dev, NULL);
+			kfree(info);
+			return ERR_PTR(ret);
 		}
 	}
 
 	return &iommu->iommu;
-
-clear_rbtree:
-	device_rbtree_remove(info);
-free:
-	dev_iommu_priv_set(dev, NULL);
-	kfree(info);
-	return ERR_PTR(ret);
 }
 
 static void intel_iommu_release_device(struct device *dev)
 {
 	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
 
-	mutex_lock(&iommu->iopf_lock);
-	device_rbtree_remove(info);
-	mutex_unlock(&iommu->iopf_lock);
 	dmar_remove_one_dev_info(dev);
 	intel_pasid_free_table(dev);
 	dev_iommu_priv_set(dev, NULL);

@@ -2286,11 +2286,6 @@ static inline int task_current(struct rq *rq, struct task_struct *p)
 	return rq->curr == p;
 }
 
-static inline int task_current_donor(struct rq *rq, struct task_struct *p)
-{
-	return task_current(rq, p);
-}
-
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
 {
 #ifdef CONFIG_SMP

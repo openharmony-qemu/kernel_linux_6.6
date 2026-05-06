@@ -296,6 +296,7 @@ void hmdfs_put_super(struct super_block *sb)
 	kfree(sbi->real_dst);
 	kfree(sbi->cache_dir);
 	kfree(sbi->cloud_dir);
+	kfree(sbi->no_delete_name);
 	kfifo_free(&sbi->notify_fifo);
 	sb->s_fs_info = NULL;
 	sbi->lower_sb = NULL;

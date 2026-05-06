@@ -23,6 +23,7 @@ enum {
 	OPT_NO_OFFLINE_STASH,
 	OPT_NO_DENTRY_CACHE,
 	OPT_USER_ID,
+	OPT_NO_DELETE_NAME,
 	OPT_ERR,
 };
 
@@ -37,6 +38,7 @@ static match_table_t hmdfs_tokens = {
 	{ OPT_NO_OFFLINE_STASH, "no_offline_stash" },
 	{ OPT_NO_DENTRY_CACHE, "no_dentry_cache" },
 	{ OPT_USER_ID, "user_id=%s"},
+	{ OPT_NO_DELETE_NAME, "no_delete_name=%s" },
 	{ OPT_ERR, NULL },
 };
 
@@ -133,6 +135,11 @@ int hmdfs_parse_options(struct hmdfs_sb_info *sbi, const char *data)
 			break;
 		case OPT_CLOUD_DIR:
 			err = hmdfs_match_strdup(&args[0], &sbi->cloud_dir);
+			if (err)
+				goto out;
+			break;
+		case OPT_NO_DELETE_NAME:
+			err = hmdfs_match_strdup(&args[0], &sbi->no_delete_name);
 			if (err)
 				goto out;
 			break;

@@ -132,6 +132,7 @@ struct hmdfs_sb_info {
 	char *local_src;
 	char *cache_dir;
 	char *cloud_dir;
+	char *no_delete_name;
 	/* seq number for hmdfs super block */
 	unsigned int seq;
 

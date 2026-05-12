@@ -12,6 +12,7 @@
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/mgmt.h>
 
+#include "hci_request.h"
 #include "hci_codec.h"
 #include "hci_debugfs.h"
 #include "smp.h"
@@ -19,6 +20,19 @@
 #include "msft.h"
 #include "aosp.h"
 #include "leds.h"
+
+#ifndef DEFINE_FLEX
+#define DEFINE_FLEX(TYPE, NAME, MEMBER, COUNTER, COUNT)			\
+	union {								\
+		u8 bytes[struct_size_t(TYPE, MEMBER, COUNT)];		\
+		TYPE obj;						\
+	} NAME##_u = { .obj = { .COUNTER = COUNT } };		\
+	TYPE *NAME = (TYPE *)&NAME##_u
+#endif
+
+#ifndef secs_to_jiffies
+#define secs_to_jiffies(_secs) msecs_to_jiffies((_secs) * 1000)
+#endif
 
 static void hci_cmd_sync_complete(struct hci_dev *hdev, u8 result, u16 opcode,
 				  struct sk_buff *skb)
@@ -2871,7 +2885,7 @@ static int hci_le_set_ext_scan_param_sync(struct hci_dev *hdev, u8 type,
 		if (sent) {
 			struct hci_conn *conn;
 
-			conn = hci_conn_hash_lookup_ba(hdev, BIS_LINK,
+			conn = hci_conn_hash_lookup_ba(hdev, ISO_LINK,
 						       &sent->bdaddr);
 			if (conn) {
 				struct bt_iso_qos *qos = &conn->iso_qos;
@@ -5167,9 +5181,9 @@ int hci_dev_close_sync(struct hci_dev *hdev)
 	bt_dev_dbg(hdev, "");
 
 	if (hci_dev_test_flag(hdev, HCI_UNREGISTER)) {
-		disable_delayed_work(&hdev->power_off);
-		disable_delayed_work(&hdev->ncmd_timer);
-		disable_delayed_work(&hdev->le_scan_disable);
+		cancel_delayed_work(&hdev->power_off);
+		cancel_delayed_work(&hdev->ncmd_timer);
+		cancel_delayed_work(&hdev->le_scan_disable);
 	} else {
 		cancel_delayed_work(&hdev->power_off);
 		cancel_delayed_work(&hdev->ncmd_timer);
@@ -5488,7 +5502,7 @@ static int hci_connect_cancel_sync(struct hci_dev *hdev, struct hci_conn *conn,
 	if (conn->type == LE_LINK)
 		return hci_le_connect_cancel_sync(hdev, conn, reason);
 
-	if (conn->type == CIS_LINK) {
+	if (conn->type == ISO_LINK) {
 		/* BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
 		 * page 1857:
 		 *
@@ -5501,10 +5515,9 @@ static int hci_connect_cancel_sync(struct hci_dev *hdev, struct hci_conn *conn,
 			return hci_disconnect_sync(hdev, conn, reason);
 
 		/* CIS with no Create CIS sent have nothing to cancel */
-		return HCI_ERROR_LOCAL_HOST_TERM;
-	}
+		if (bacmp(&conn->dst, BDADDR_ANY))
+			return HCI_ERROR_LOCAL_HOST_TERM;
 
-	if (conn->type == BIS_LINK) {
 		/* There is no way to cancel a BIS without terminating the BIG
 		 * which is done later on connection cleanup.
 		 */
@@ -5566,11 +5579,12 @@ static int hci_reject_conn_sync(struct hci_dev *hdev, struct hci_conn *conn,
 {
 	struct hci_cp_reject_conn_req cp;
 
-	if (conn->type == CIS_LINK)
-		return hci_le_reject_cis_sync(hdev, conn, reason);
+	if (conn->type == ISO_LINK) {
+		if (!bacmp(&conn->dst, BDADDR_ANY))
+			return -EINVAL;
 
-	if (conn->type == BIS_LINK)
-		return -EINVAL;
+		return hci_le_reject_cis_sync(hdev, conn, reason);
+	}
 
 	if (conn->type == SCO_LINK || conn->type == ESCO_LINK)
 		return hci_reject_sco_sync(hdev, conn, reason);
@@ -6932,7 +6946,7 @@ static void create_pa_complete(struct hci_dev *hdev, void *data, int err)
 		goto unlock;
 
 	/* Add connection to indicate PA sync error */
-	pa_sync = hci_conn_add_unset(hdev, BIS_LINK, BDADDR_ANY,
+	pa_sync = hci_conn_add_unset(hdev, ISO_LINK, BDADDR_ANY,
 				     HCI_ROLE_SLAVE);
 
 	if (IS_ERR(pa_sync))
@@ -7040,7 +7054,7 @@ static void create_big_complete(struct hci_dev *hdev, void *data, int err)
 		clear_bit(HCI_CONN_CREATE_BIG_SYNC, &conn->flags);
 }
 
-static int hci_le_big_create_sync(struct hci_dev *hdev, void *data)
+static int hci_le_big_create_queued_sync(struct hci_dev *hdev, void *data)
 {
 	DEFINE_FLEX(struct hci_cp_le_big_create_sync, cp, bis, num_bis, 0x11);
 	struct hci_conn *conn = data;
@@ -7086,6 +7100,6 @@ static int hci_le_big_create_sync(struct hci_dev *hdev, void *data)
 
 int hci_connect_big_sync(struct hci_dev *hdev, struct hci_conn *conn)
 {
-	return hci_cmd_sync_queue_once(hdev, hci_le_big_create_sync, conn,
+	return hci_cmd_sync_queue_once(hdev, hci_le_big_create_queued_sync, conn,
 				       create_big_complete);
 }

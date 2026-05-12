@@ -155,6 +155,8 @@ int hci_le_big_terminate_sync(struct hci_dev *hdev, u8 handle);
 
 int hci_le_pa_terminate_sync(struct hci_dev *hdev, u16 handle);
 
+int hci_inquiry_sync(struct hci_dev *hdev, u8 length, u8 num_rsp);
+
 int hci_connect_acl_sync(struct hci_dev *hdev, struct hci_conn *conn);
 
 int hci_connect_le_sync(struct hci_dev *hdev, struct hci_conn *conn);

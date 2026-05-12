@@ -55,7 +55,6 @@
 #include <linux/pgtable.h>
 #include <linux/buildid.h>
 #include <linux/task_work.h>
-#include <linux/percpu-rwsem.h>
 
 #include "internal.h"
 
@@ -156,56 +155,34 @@ static int cpu_function_call(int cpu, remote_function_f func, void *info)
 	return data.ret;
 }
 
-enum event_type_t {
-	EVENT_FLEXIBLE	= 0x01,
-	EVENT_PINNED	= 0x02,
-	EVENT_TIME	= 0x04,
-	EVENT_FROZEN	= 0x08,
-	/* see ctx_resched() for details */
-	EVENT_CPU	= 0x10,
-	EVENT_CGROUP	= 0x20,
-
-	/* compound helpers */
-	EVENT_ALL         = EVENT_FLEXIBLE | EVENT_PINNED,
-	EVENT_TIME_FROZEN = EVENT_TIME | EVENT_FROZEN,
-};
-
-static inline void __perf_ctx_lock(struct perf_event_context *ctx)
-{
-	raw_spin_lock(&ctx->lock);
-	WARN_ON_ONCE(ctx->is_active & EVENT_FROZEN);
-}
-
 static void perf_ctx_lock(struct perf_cpu_context *cpuctx,
 			  struct perf_event_context *ctx)
 {
-	__perf_ctx_lock(&cpuctx->ctx);
+	raw_spin_lock(&cpuctx->ctx.lock);
 	if (ctx)
-		__perf_ctx_lock(ctx);
-}
-
-static inline void __perf_ctx_unlock(struct perf_event_context *ctx)
-{
-	/*
-	 * If ctx_sched_in() didn't again set any ALL flags, clean up
-	 * after ctx_sched_out() by clearing is_active.
-	 */
-	if (ctx->is_active & EVENT_FROZEN) {
-		if (!(ctx->is_active & EVENT_ALL))
-			ctx->is_active = 0;
-		else
-			ctx->is_active &= ~EVENT_FROZEN;
-	}
-	raw_spin_unlock(&ctx->lock);
+		raw_spin_lock(&ctx->lock);
 }
 
 static void perf_ctx_unlock(struct perf_cpu_context *cpuctx,
 			    struct perf_event_context *ctx)
 {
 	if (ctx)
-		__perf_ctx_unlock(ctx);
-	__perf_ctx_unlock(&cpuctx->ctx);
+		raw_spin_unlock(&ctx->lock);
+	raw_spin_unlock(&cpuctx->ctx.lock);
 }
+
+typedef struct {
+	struct perf_cpu_context *cpuctx;
+	struct perf_event_context *ctx;
+} class_perf_ctx_lock_t;
+
+static inline void class_perf_ctx_lock_destructor(class_perf_ctx_lock_t *_T)
+{ perf_ctx_unlock(_T->cpuctx, _T->ctx); }
+
+static inline class_perf_ctx_lock_t
+class_perf_ctx_lock_constructor(struct perf_cpu_context *cpuctx,
+				struct perf_event_context *ctx)
+{ perf_ctx_lock(cpuctx, ctx); return (class_perf_ctx_lock_t){ cpuctx, ctx }; }
 
 #define TASK_TOMBSTONE ((void *)-1L)
 
@@ -409,6 +386,16 @@ unlock:
 	(PERF_SAMPLE_BRANCH_KERNEL |\
 	 PERF_SAMPLE_BRANCH_HV)
 
+enum event_type_t {
+	EVENT_FLEXIBLE = 0x1,
+	EVENT_PINNED = 0x2,
+	EVENT_TIME = 0x4,
+	/* see ctx_resched() for details */
+	EVENT_CPU = 0x8,
+	EVENT_CGROUP = 0x10,
+	EVENT_ALL = EVENT_FLEXIBLE | EVENT_PINNED,
+};
+
 /*
  * perf_sched_events : >0 events exist
  */
@@ -437,11 +424,6 @@ static LIST_HEAD(pmus);
 static DEFINE_MUTEX(pmus_lock);
 static struct srcu_struct pmus_srcu;
 static cpumask_var_t perf_online_mask;
-static cpumask_var_t perf_online_core_mask;
-static cpumask_var_t perf_online_die_mask;
-static cpumask_var_t perf_online_cluster_mask;
-static cpumask_var_t perf_online_pkg_mask;
-static cpumask_var_t perf_online_sys_mask;
 static struct kmem_cache *perf_event_cache;
 
 /*
@@ -453,8 +435,8 @@ static struct kmem_cache *perf_event_cache;
  */
 int sysctl_perf_event_paranoid __read_mostly = 2;
 
-/* Minimum for 512 kiB + 1 user control page. 'free' kiB per user. */
-static int sysctl_perf_event_mlock __read_mostly = 512 + (PAGE_SIZE / 1024);
+/* Minimum for 512 kiB + 1 user control page */
+int sysctl_perf_event_mlock __read_mostly = 512 + (PAGE_SIZE / 1024); /* 'free' kiB per user */
 
 /*
  * max perf event sample rate
@@ -464,7 +446,6 @@ static int sysctl_perf_event_mlock __read_mostly = 512 + (PAGE_SIZE / 1024);
 #define DEFAULT_CPU_TIME_MAX_PERCENT	25
 
 int sysctl_perf_event_sample_rate __read_mostly	= DEFAULT_MAX_SAMPLE_RATE;
-static int sysctl_perf_cpu_time_max_percent __read_mostly = DEFAULT_CPU_TIME_MAX_PERCENT;
 
 static int max_samples_per_tick __read_mostly	= DIV_ROUND_UP(DEFAULT_MAX_SAMPLE_RATE, HZ);
 static int perf_sample_period_ns __read_mostly	= DEFAULT_SAMPLE_PERIOD_NS;
@@ -486,8 +467,8 @@ static void update_perf_cpu_limits(void)
 
 static bool perf_rotate_context(struct perf_cpu_pmu_context *cpc);
 
-static int perf_event_max_sample_rate_handler(const struct ctl_table *table, int write,
-				       void *buffer, size_t *lenp, loff_t *ppos)
+int perf_proc_update_handler(struct ctl_table *table, int write,
+		void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
 	int perf_cpu = sysctl_perf_cpu_time_max_percent;
@@ -508,7 +489,9 @@ static int perf_event_max_sample_rate_handler(const struct ctl_table *table, int
 	return 0;
 }
 
-static int perf_cpu_time_max_percent_handler(const struct ctl_table *table, int write,
+int sysctl_perf_cpu_time_max_percent __read_mostly = DEFAULT_CPU_TIME_MAX_PERCENT;
+
+int perf_cpu_time_max_percent_handler(struct ctl_table *table, int write,
 		void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
@@ -527,52 +510,6 @@ static int perf_cpu_time_max_percent_handler(const struct ctl_table *table, int 
 
 	return 0;
 }
-
-static const struct ctl_table events_core_sysctl_table[] = {
-	/*
-	 * User-space relies on this file as a feature check for
-	 * perf_events being enabled. It's an ABI, do not remove!
-	 */
-	{
-		.procname	= "perf_event_paranoid",
-		.data		= &sysctl_perf_event_paranoid,
-		.maxlen		= sizeof(sysctl_perf_event_paranoid),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-	{
-		.procname	= "perf_event_mlock_kb",
-		.data		= &sysctl_perf_event_mlock,
-		.maxlen		= sizeof(sysctl_perf_event_mlock),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-	{
-		.procname	= "perf_event_max_sample_rate",
-		.data		= &sysctl_perf_event_sample_rate,
-		.maxlen		= sizeof(sysctl_perf_event_sample_rate),
-		.mode		= 0644,
-		.proc_handler	= perf_event_max_sample_rate_handler,
-		.extra1		= SYSCTL_ONE,
-	},
-	{
-		.procname	= "perf_cpu_time_max_percent",
-		.data		= &sysctl_perf_cpu_time_max_percent,
-		.maxlen		= sizeof(sysctl_perf_cpu_time_max_percent),
-		.mode		= 0644,
-		.proc_handler	= perf_cpu_time_max_percent_handler,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE_HUNDRED,
-	},
-};
-
-static int __init init_events_core_sysctls(void)
-{
-	register_sysctl_init("kernel", events_core_sysctl_table);
-	return 0;
-}
-core_initcall(init_events_core_sysctls);
-
 
 /*
  * perf samples are done in some very critical code paths (NMIs).
@@ -614,7 +551,7 @@ void perf_sample_event_took(u64 sample_len_ns)
 	__this_cpu_write(running_sample_length, running_len);
 
 	/*
-	 * Note: this will be biased artificially low until we have
+	 * Note: this will be biased artifically low until we have
 	 * seen NR_ACCUMULATED_SAMPLES. Doing it this way keeps us
 	 * from having to maintain a count.
 	 */
@@ -676,10 +613,10 @@ static inline u64 perf_event_clock(struct perf_event *event)
  *
  * Event groups make things a little more complicated, but not terribly so. The
  * rules for a group are that if the group leader is OFF the entire group is
- * OFF, irrespective of what the group member states are. This results in
+ * OFF, irrespecive of what the group member states are. This results in
  * __perf_effective_state().
  *
- * A further ramification is that when a group leader flips between OFF and
+ * A futher ramification is that when a group leader flips between OFF and
  * !OFF, we need to update all group member times.
  *
  *
@@ -765,32 +702,30 @@ do {									\
 	___p;								\
 })
 
-#define for_each_epc(_epc, _ctx, _pmu, _cgroup)				\
-	list_for_each_entry(_epc, &((_ctx)->pmu_ctx_list), pmu_ctx_entry) \
-		if (_cgroup && !_epc->nr_cgroups)			\
-			continue;					\
-		else if (_pmu && _epc->pmu != _pmu)			\
-			continue;					\
-		else
-
 static void perf_ctx_disable(struct perf_event_context *ctx, bool cgroup)
 {
 	struct perf_event_pmu_context *pmu_ctx;
 
-	for_each_epc(pmu_ctx, ctx, NULL, cgroup)
+	list_for_each_entry(pmu_ctx, &ctx->pmu_ctx_list, pmu_ctx_entry) {
+		if (cgroup && !pmu_ctx->nr_cgroups)
+			continue;
 		perf_pmu_disable(pmu_ctx->pmu);
+	}
 }
 
 static void perf_ctx_enable(struct perf_event_context *ctx, bool cgroup)
 {
 	struct perf_event_pmu_context *pmu_ctx;
 
-	for_each_epc(pmu_ctx, ctx, NULL, cgroup)
+	list_for_each_entry(pmu_ctx, &ctx->pmu_ctx_list, pmu_ctx_entry) {
+		if (cgroup && !pmu_ctx->nr_cgroups)
+			continue;
 		perf_pmu_enable(pmu_ctx->pmu);
+	}
 }
 
-static void ctx_sched_out(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t event_type);
-static void ctx_sched_in(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t event_type);
+static void ctx_sched_out(struct perf_event_context *ctx, enum event_type_t event_type);
+static void ctx_sched_in(struct perf_event_context *ctx, enum event_type_t event_type);
 
 #ifdef CONFIG_CGROUP_PERF
 
@@ -938,16 +873,22 @@ static void perf_cgroup_switch(struct task_struct *task)
 	if (READ_ONCE(cpuctx->cgrp) == NULL)
 		return;
 
-	WARN_ON_ONCE(cpuctx->ctx.nr_cgroups == 0);
-
 	cgrp = perf_cgroup_from_task(task, NULL);
 	if (READ_ONCE(cpuctx->cgrp) == cgrp)
 		return;
 
-	perf_ctx_lock(cpuctx, cpuctx->task_ctx);
+	guard(perf_ctx_lock)(cpuctx, cpuctx->task_ctx);
+	/*
+	 * Re-check, could've raced vs perf_remove_from_context().
+	 */
+	if (READ_ONCE(cpuctx->cgrp) == NULL)
+		return;
+
+	WARN_ON_ONCE(cpuctx->ctx.nr_cgroups == 0);
+
 	perf_ctx_disable(&cpuctx->ctx, true);
 
-	ctx_sched_out(&cpuctx->ctx, NULL, EVENT_ALL|EVENT_CGROUP);
+	ctx_sched_out(&cpuctx->ctx, EVENT_ALL|EVENT_CGROUP);
 	/*
 	 * must not be done before ctxswout due
 	 * to update_cgrp_time_from_cpuctx() in
@@ -959,10 +900,9 @@ static void perf_cgroup_switch(struct task_struct *task)
 	 * perf_cgroup_set_timestamp() in ctx_sched_in()
 	 * to not have to pass task around
 	 */
-	ctx_sched_in(&cpuctx->ctx, NULL, EVENT_ALL|EVENT_CGROUP);
+	ctx_sched_in(&cpuctx->ctx, EVENT_ALL|EVENT_CGROUP);
 
 	perf_ctx_enable(&cpuctx->ctx, true);
-	perf_ctx_unlock(cpuctx, cpuctx->task_ctx);
 }
 
 static int perf_cgroup_ensure_storage(struct perf_event *event,
@@ -973,7 +913,7 @@ static int perf_cgroup_ensure_storage(struct perf_event *event,
 	int cpu, heap_size, ret = 0;
 
 	/*
-	 * Allow storage to have sufficient space for an iterator for each
+	 * Allow storage to have sufficent space for an iterator for each
 	 * possibly nested cgroup plus an iterator for events with no cgroup.
 	 */
 	for (heap_size = 1; css; css = css->parent)
@@ -1012,20 +952,22 @@ static inline int perf_cgroup_connect(int fd, struct perf_event *event,
 {
 	struct perf_cgroup *cgrp;
 	struct cgroup_subsys_state *css;
-	CLASS(fd, f)(fd);
+	struct fd f = fdget(fd);
 	int ret = 0;
 
-	if (fd_empty(f))
+	if (!f.file)
 		return -EBADF;
 
-	css = css_tryget_online_from_dir(fd_file(f)->f_path.dentry,
+	css = css_tryget_online_from_dir(f.file->f_path.dentry,
 					 &perf_event_cgrp_subsys);
-	if (IS_ERR(css))
-		return PTR_ERR(css);
+	if (IS_ERR(css)) {
+		ret = PTR_ERR(css);
+		goto out;
+	}
 
 	ret = perf_cgroup_ensure_storage(event, css);
 	if (ret)
-		return ret;
+		goto out;
 
 	cgrp = container_of(css, struct perf_cgroup, css);
 	event->cgrp = cgrp;
@@ -1039,6 +981,8 @@ static inline int perf_cgroup_connect(int fd, struct perf_event *event,
 		perf_detach_cgroup(event);
 		ret = -EINVAL;
 	}
+out:
+	fdput(f);
 	return ret;
 }
 
@@ -1193,8 +1137,8 @@ static void __perf_mux_hrtimer_init(struct perf_cpu_pmu_context *cpc, int cpu)
 	cpc->hrtimer_interval = ns_to_ktime(NSEC_PER_MSEC * interval);
 
 	raw_spin_lock_init(&cpc->hrtimer_lock);
-	hrtimer_setup(timer, perf_mux_hrtimer_handler, CLOCK_MONOTONIC,
-		      HRTIMER_MODE_ABS_PINNED_HARD);
+	hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED_HARD);
+	timer->function = perf_mux_hrtimer_handler;
 }
 
 static int perf_mux_hrtimer_restart(struct perf_cpu_pmu_context *cpc)
@@ -1218,29 +1162,23 @@ static int perf_mux_hrtimer_restart_ipi(void *arg)
 	return perf_mux_hrtimer_restart(arg);
 }
 
-static __always_inline struct perf_cpu_pmu_context *this_cpc(struct pmu *pmu)
-{
-	return *this_cpu_ptr(pmu->cpu_pmu_context);
-}
-
 void perf_pmu_disable(struct pmu *pmu)
 {
-	int *count = &this_cpc(pmu)->pmu_disable_count;
+	int *count = this_cpu_ptr(pmu->pmu_disable_count);
 	if (!(*count)++)
 		pmu->pmu_disable(pmu);
 }
 
 void perf_pmu_enable(struct pmu *pmu)
 {
-	int *count = &this_cpc(pmu)->pmu_disable_count;
+	int *count = this_cpu_ptr(pmu->pmu_disable_count);
 	if (!--(*count))
 		pmu->pmu_enable(pmu);
 }
 
 static void perf_assert_pmu_disabled(struct pmu *pmu)
 {
-	int *count = &this_cpc(pmu)->pmu_disable_count;
-	WARN_ON_ONCE(*count == 0);
+	WARN_ON_ONCE(*this_cpu_ptr(pmu->pmu_disable_count) == 0);
 }
 
 static inline void perf_pmu_read(struct perf_event *event)
@@ -1252,6 +1190,20 @@ static inline void perf_pmu_read(struct perf_event *event)
 static void get_ctx(struct perf_event_context *ctx)
 {
 	refcount_inc(&ctx->refcount);
+}
+
+static void *alloc_task_ctx_data(struct pmu *pmu)
+{
+	if (pmu->task_ctx_cache)
+		return kmem_cache_zalloc(pmu->task_ctx_cache, GFP_KERNEL);
+
+	return NULL;
+}
+
+static void free_task_ctx_data(struct pmu *pmu, void *task_ctx_data)
+{
+	if (pmu->task_ctx_cache && task_ctx_data)
+		kmem_cache_free(pmu->task_ctx_cache, task_ctx_data);
 }
 
 static void free_ctx(struct rcu_head *head)
@@ -1845,14 +1797,6 @@ perf_event_groups_next(struct perf_event *event, struct pmu *pmu)
 				typeof(*event), group_node))
 
 /*
- * Does the event attribute request inherit with PERF_SAMPLE_READ
- */
-static inline bool has_inherit_and_sample_read(struct perf_event_attr *attr)
-{
-	return attr->inherit && (attr->sample_type & PERF_SAMPLE_READ);
-}
-
-/*
  * Add an event from the lists for its context.
  * Must be called with ctx->mutex and ctx->lock held.
  */
@@ -1882,8 +1826,6 @@ list_add_event(struct perf_event *event, struct perf_event_context *ctx)
 		ctx->nr_user++;
 	if (event->attr.inherit_stat)
 		ctx->nr_stat++;
-	if (has_inherit_and_sample_read(&event->attr))
-		local_inc(&ctx->nr_no_switch_fast);
 
 	if (event->state > PERF_EVENT_STATE_OFF)
 		perf_cgroup_event_enable(event, ctx);
@@ -2108,8 +2050,6 @@ list_del_event(struct perf_event *event, struct perf_event_context *ctx)
 		ctx->nr_user--;
 	if (event->attr.inherit_stat)
 		ctx->nr_stat--;
-	if (has_inherit_and_sample_read(&event->attr))
-		local_dec(&ctx->nr_no_switch_fast);
 
 	list_del_rcu(&event->event_entry);
 
@@ -2145,8 +2085,9 @@ perf_aux_output_match(struct perf_event *event, struct perf_event *aux_event)
 }
 
 static void put_event(struct perf_event *event);
-static void event_sched_out(struct perf_event *event,
-			    struct perf_event_context *ctx);
+static void __event_disable(struct perf_event *event,
+			    struct perf_event_context *ctx,
+			    enum perf_event_state state);
 
 static void perf_put_aux_event(struct perf_event *event)
 {
@@ -2179,14 +2120,13 @@ static void perf_put_aux_event(struct perf_event *event)
 		 * state so that we don't try to schedule it again. Note
 		 * that perf_event_enable() will clear the ERROR status.
 		 */
-		event_sched_out(iter, ctx);
-		perf_event_set_state(event, PERF_EVENT_STATE_ERROR);
+		__event_disable(iter, ctx, PERF_EVENT_STATE_ERROR);
 	}
 }
 
 static bool perf_need_aux_event(struct perf_event *event)
 {
-	return event->attr.aux_output || has_aux_action(event);
+	return !!event->attr.aux_output || !!event->attr.aux_sample_size;
 }
 
 static int perf_get_aux_event(struct perf_event *event,
@@ -2211,10 +2151,6 @@ static int perf_get_aux_event(struct perf_event *event,
 	    !perf_aux_output_match(event, group_leader))
 		return 0;
 
-	if ((event->attr.aux_pause || event->attr.aux_resume) &&
-	    !(group_leader->pmu->capabilities & PERF_PMU_CAP_AUX_PAUSE))
-		return 0;
-
 	if (event->attr.aux_sample_size && !group_leader->pmu->snapshot_aux)
 		return 0;
 
@@ -2236,18 +2172,6 @@ static inline struct list_head *get_event_list(struct perf_event *event)
 {
 	return event->attr.pinned ? &event->pmu_ctx->pinned_active :
 				    &event->pmu_ctx->flexible_active;
-}
-
-/*
- * Events that have PERF_EV_CAP_SIBLING require being part of a group and
- * cannot exist on their own, schedule them out and move them into the ERROR
- * state. Also see _perf_event_enable(), it will not be able to recover
- * this ERROR state.
- */
-static inline void perf_remove_sibling_event(struct perf_event *event)
-{
-	event_sched_out(event, event->ctx);
-	perf_event_set_state(event, PERF_EVENT_STATE_ERROR);
 }
 
 static void perf_group_detach(struct perf_event *event)
@@ -2285,8 +2209,15 @@ static void perf_group_detach(struct perf_event *event)
 	 */
 	list_for_each_entry_safe(sibling, tmp, &event->sibling_list, sibling_list) {
 
+		/*
+		 * Events that have PERF_EV_CAP_SIBLING require being part of
+		 * a group and cannot exist on their own, schedule them out
+		 * and move them into the ERROR state. Also see
+		 * _perf_event_enable(), it will not be able to recover this
+		 * ERROR state.
+		 */
 		if (sibling->event_caps & PERF_EV_CAP_SIBLING)
-			perf_remove_sibling_event(sibling);
+			__event_disable(sibling, ctx, PERF_EVENT_STATE_ERROR);
 
 		sibling->group_leader = sibling;
 		list_del_init(&sibling->sibling_list);
@@ -2347,7 +2278,7 @@ static void
 event_sched_out(struct perf_event *event, struct perf_event_context *ctx)
 {
 	struct perf_event_pmu_context *epc = event->pmu_ctx;
-	struct perf_cpu_pmu_context *cpc = this_cpc(epc->pmu);
+	struct perf_cpu_pmu_context *cpc = this_cpu_ptr(epc->pmu->cpu_pmu_context);
 	enum perf_event_state state = PERF_EVENT_STATE_INACTIVE;
 
 	// XXX cpc serialization, probably per-cpu IRQ disabled
@@ -2376,14 +2307,24 @@ event_sched_out(struct perf_event *event, struct perf_event_context *ctx)
 		state = PERF_EVENT_STATE_OFF;
 	}
 
+	if (event->pending_sigtrap) {
+		event->pending_sigtrap = 0;
+		if (state != PERF_EVENT_STATE_OFF &&
+		    !event->pending_work &&
+		    !task_work_add(current, &event->pending_task, TWA_RESUME)) {
+			event->pending_work = 1;
+			WARN_ON_ONCE(!atomic_long_inc_not_zero(&event->refcount));
+		} else {
+			local_dec(&event->ctx->nr_pending);
+		}
+	}
+
 	perf_event_set_state(event, state);
 
 	if (!is_software_event(event))
 		cpc->active_oncpu--;
-	if (event->attr.freq && event->attr.sample_freq) {
+	if (event->attr.freq && event->attr.sample_freq)
 		ctx->nr_freq--;
-		epc->nr_freq--;
-	}
 	if (event->attr.exclusive || !cpc->active_oncpu)
 		cpc->exclusive = 0;
 
@@ -2409,45 +2350,6 @@ group_sched_out(struct perf_event *group_event, struct perf_event_context *ctx)
 		event_sched_out(event, ctx);
 }
 
-static inline void
-__ctx_time_update(struct perf_cpu_context *cpuctx, struct perf_event_context *ctx, bool final)
-{
-	if (ctx->is_active & EVENT_TIME) {
-		if (ctx->is_active & EVENT_FROZEN)
-			return;
-		update_context_time(ctx);
-		update_cgrp_time_from_cpuctx(cpuctx, final);
-	}
-}
-
-static inline void
-ctx_time_update(struct perf_cpu_context *cpuctx, struct perf_event_context *ctx)
-{
-	__ctx_time_update(cpuctx, ctx, false);
-}
-
-/*
- * To be used inside perf_ctx_lock() / perf_ctx_unlock(). Lasts until perf_ctx_unlock().
- */
-static inline void
-ctx_time_freeze(struct perf_cpu_context *cpuctx, struct perf_event_context *ctx)
-{
-	ctx_time_update(cpuctx, ctx);
-	if (ctx->is_active & EVENT_TIME)
-		ctx->is_active |= EVENT_FROZEN;
-}
-
-static inline void
-ctx_time_update_event(struct perf_event_context *ctx, struct perf_event *event)
-{
-	if (ctx->is_active & EVENT_TIME) {
-		if (ctx->is_active & EVENT_FROZEN)
-			return;
-		update_context_time(ctx);
-		update_cgrp_time_from_event(event);
-	}
-}
-
 #define DETACH_GROUP	0x01UL
 #define DETACH_CHILD	0x02UL
 #define DETACH_DEAD	0x04UL
@@ -2469,7 +2371,10 @@ __perf_remove_from_context(struct perf_event *event,
 	enum perf_event_state state = PERF_EVENT_STATE_OFF;
 	unsigned long flags = (unsigned long)info;
 
-	ctx_time_update(cpuctx, ctx);
+	if (ctx->is_active & EVENT_TIME) {
+		update_context_time(ctx);
+		update_cgrp_time_from_cpuctx(cpuctx, false);
+	}
 
 	/*
 	 * Ensure event_sched_out() switches to OFF, at the very least
@@ -2493,8 +2398,9 @@ __perf_remove_from_context(struct perf_event *event,
 		pmu_ctx->rotate_necessary = 0;
 
 		if (ctx->task && ctx->is_active) {
-			struct perf_cpu_pmu_context *cpc = this_cpc(pmu_ctx->pmu);
+			struct perf_cpu_pmu_context *cpc;
 
+			cpc = this_cpu_ptr(pmu_ctx->pmu->cpu_pmu_context);
 			WARN_ON_ONCE(cpc->task_epc && cpc->task_epc != pmu_ctx);
 			cpc->task_epc = NULL;
 		}
@@ -2545,6 +2451,15 @@ static void perf_remove_from_context(struct perf_event *event, unsigned long fla
 	event_function_call(event, __perf_remove_from_context, (void *)flags);
 }
 
+static void __event_disable(struct perf_event *event,
+			    struct perf_event_context *ctx,
+			    enum perf_event_state state)
+{
+	event_sched_out(event, ctx);
+	perf_cgroup_event_disable(event, ctx);
+	perf_event_set_state(event, state);
+}
+
 /*
  * Cross CPU call to disable a performance event
  */
@@ -2556,16 +2471,25 @@ static void __perf_event_disable(struct perf_event *event,
 	if (event->state < PERF_EVENT_STATE_INACTIVE)
 		return;
 
-	perf_pmu_disable(event->pmu_ctx->pmu);
-	ctx_time_update_event(ctx, event);
+	if (ctx->is_active & EVENT_TIME) {
+		update_context_time(ctx);
+		update_cgrp_time_from_event(event);
+	}
 
+	perf_pmu_disable(event->pmu_ctx->pmu);
+
+	/*
+	 * When disabling a group leader, the whole group becomes ineligible
+	 * to run, so schedule out the full group.
+	 */
 	if (event == event->group_leader)
 		group_sched_out(event, ctx);
-	else
-		event_sched_out(event, ctx);
 
-	perf_event_set_state(event, PERF_EVENT_STATE_OFF);
-	perf_cgroup_event_disable(event, ctx);
+	/*
+	 * But only mark the leader OFF; the siblings will remain
+	 * INACTIVE.
+	 */
+	__event_disable(event, ctx, PERF_EVENT_STATE_OFF);
 
 	perf_pmu_enable(event->pmu_ctx->pmu);
 }
@@ -2580,7 +2504,7 @@ static void __perf_event_disable(struct perf_event *event,
  * hold the top-level event's child_mutex, so any descendant that
  * goes to exit will block in perf_event_exit_event().
  *
- * When called from perf_pending_disable it's OK because event->ctx
+ * When called from perf_pending_irq it's OK because event->ctx
  * is the current context on this CPU and preemption is disabled,
  * hence we can't get into perf_event_task_sched_out for this context.
  */
@@ -2620,7 +2544,7 @@ EXPORT_SYMBOL_GPL(perf_event_disable);
 void perf_event_disable_inatomic(struct perf_event *event)
 {
 	event->pending_disable = 1;
-	irq_work_queue(&event->pending_disable_irq);
+	irq_work_queue(&event->pending_irq);
 }
 
 #define MAX_INTERRUPTS (~0ULL)
@@ -2632,7 +2556,7 @@ static int
 event_sched_in(struct perf_event *event, struct perf_event_context *ctx)
 {
 	struct perf_event_pmu_context *epc = event->pmu_ctx;
-	struct perf_cpu_pmu_context *cpc = this_cpc(epc->pmu);
+	struct perf_cpu_pmu_context *cpc = this_cpu_ptr(epc->pmu->cpu_pmu_context);
 	int ret = 0;
 
 	WARN_ON_ONCE(event->ctx != ctx);
@@ -2674,10 +2598,9 @@ event_sched_in(struct perf_event *event, struct perf_event_context *ctx)
 
 	if (!is_software_event(event))
 		cpc->active_oncpu++;
-	if (event->attr.freq && event->attr.sample_freq) {
+	if (event->attr.freq && event->attr.sample_freq)
 		ctx->nr_freq++;
-		epc->nr_freq++;
-	}
+
 	if (event->attr.exclusive)
 		cpc->exclusive = 1;
 
@@ -2739,7 +2662,7 @@ error:
 static int group_can_go_on(struct perf_event *event, int can_add_hw)
 {
 	struct perf_event_pmu_context *epc = event->pmu_ctx;
-	struct perf_cpu_pmu_context *cpc = this_cpc(epc->pmu);
+	struct perf_cpu_pmu_context *cpc = this_cpu_ptr(epc->pmu->cpu_pmu_context);
 
 	/*
 	 * Groups consisting entirely of software events can always go on.
@@ -2773,8 +2696,7 @@ static void add_event_to_ctx(struct perf_event *event,
 }
 
 static void task_ctx_sched_out(struct perf_event_context *ctx,
-			       struct pmu *pmu,
-			       enum event_type_t event_type)
+				enum event_type_t event_type)
 {
 	struct perf_cpu_context *cpuctx = this_cpu_ptr(&perf_cpu_context);
 
@@ -2784,19 +2706,18 @@ static void task_ctx_sched_out(struct perf_event_context *ctx,
 	if (WARN_ON_ONCE(ctx != cpuctx->task_ctx))
 		return;
 
-	ctx_sched_out(ctx, pmu, event_type);
+	ctx_sched_out(ctx, event_type);
 }
 
 static void perf_event_sched_in(struct perf_cpu_context *cpuctx,
-				struct perf_event_context *ctx,
-				struct pmu *pmu)
+				struct perf_event_context *ctx)
 {
-	ctx_sched_in(&cpuctx->ctx, pmu, EVENT_PINNED);
+	ctx_sched_in(&cpuctx->ctx, EVENT_PINNED);
 	if (ctx)
-		 ctx_sched_in(ctx, pmu, EVENT_PINNED);
-	ctx_sched_in(&cpuctx->ctx, pmu, EVENT_FLEXIBLE);
+		 ctx_sched_in(ctx, EVENT_PINNED);
+	ctx_sched_in(&cpuctx->ctx, EVENT_FLEXIBLE);
 	if (ctx)
-		 ctx_sched_in(ctx, pmu, EVENT_FLEXIBLE);
+		 ctx_sched_in(ctx, EVENT_FLEXIBLE);
 }
 
 /*
@@ -2814,12 +2735,16 @@ static void perf_event_sched_in(struct perf_cpu_context *cpuctx,
  * event_type is a bit mask of the types of events involved. For CPU events,
  * event_type is only either EVENT_PINNED or EVENT_FLEXIBLE.
  */
+/*
+ * XXX: ctx_resched() reschedule entire perf_event_context while adding new
+ * event to the context or enabling existing event in the context. We can
+ * probably optimize it by rescheduling only affected pmu_ctx.
+ */
 static void ctx_resched(struct perf_cpu_context *cpuctx,
 			struct perf_event_context *task_ctx,
-			struct pmu *pmu, enum event_type_t event_type)
+			enum event_type_t event_type)
 {
 	bool cpu_event = !!(event_type & EVENT_CPU);
-	struct perf_event_pmu_context *epc;
 
 	/*
 	 * If pinned groups are involved, flexible groups also need to be
@@ -2830,14 +2755,10 @@ static void ctx_resched(struct perf_cpu_context *cpuctx,
 
 	event_type &= EVENT_ALL;
 
-	for_each_epc(epc, &cpuctx->ctx, pmu, false)
-		perf_pmu_disable(epc->pmu);
-
+	perf_ctx_disable(&cpuctx->ctx, false);
 	if (task_ctx) {
-		for_each_epc(epc, task_ctx, pmu, false)
-			perf_pmu_disable(epc->pmu);
-
-		task_ctx_sched_out(task_ctx, pmu, event_type);
+		perf_ctx_disable(task_ctx, false);
+		task_ctx_sched_out(task_ctx, event_type);
 	}
 
 	/*
@@ -2848,19 +2769,15 @@ static void ctx_resched(struct perf_cpu_context *cpuctx,
 	 *  - otherwise, do nothing more.
 	 */
 	if (cpu_event)
-		ctx_sched_out(&cpuctx->ctx, pmu, event_type);
+		ctx_sched_out(&cpuctx->ctx, event_type);
 	else if (event_type & EVENT_PINNED)
-		ctx_sched_out(&cpuctx->ctx, pmu, EVENT_FLEXIBLE);
+		ctx_sched_out(&cpuctx->ctx, EVENT_FLEXIBLE);
 
-	perf_event_sched_in(cpuctx, task_ctx, pmu);
+	perf_event_sched_in(cpuctx, task_ctx);
 
-	for_each_epc(epc, &cpuctx->ctx, pmu, false)
-		perf_pmu_enable(epc->pmu);
-
-	if (task_ctx) {
-		for_each_epc(epc, task_ctx, pmu, false)
-			perf_pmu_enable(epc->pmu);
-	}
+	perf_ctx_enable(&cpuctx->ctx, false);
+	if (task_ctx)
+		perf_ctx_enable(task_ctx, false);
 }
 
 void perf_pmu_resched(struct pmu *pmu)
@@ -2869,7 +2786,7 @@ void perf_pmu_resched(struct pmu *pmu)
 	struct perf_event_context *task_ctx = cpuctx->task_ctx;
 
 	perf_ctx_lock(cpuctx, task_ctx);
-	ctx_resched(cpuctx, task_ctx, pmu, EVENT_ALL|EVENT_CPU);
+	ctx_resched(cpuctx, task_ctx, EVENT_ALL|EVENT_CPU);
 	perf_ctx_unlock(cpuctx, task_ctx);
 }
 
@@ -2925,10 +2842,9 @@ static int  __perf_install_in_context(void *info)
 #endif
 
 	if (reprogram) {
-		ctx_time_freeze(cpuctx, ctx);
+		ctx_sched_out(ctx, EVENT_TIME);
 		add_event_to_ctx(event, ctx);
-		ctx_resched(cpuctx, task_ctx, event->pmu_ctx->pmu,
-			    get_event_type(event));
+		ctx_resched(cpuctx, task_ctx, get_event_type(event));
 	} else {
 		add_event_to_ctx(event, ctx);
 	}
@@ -3071,7 +2987,8 @@ static void __perf_event_enable(struct perf_event *event,
 	    event->state <= PERF_EVENT_STATE_ERROR)
 		return;
 
-	ctx_time_freeze(cpuctx, ctx);
+	if (ctx->is_active)
+		ctx_sched_out(ctx, EVENT_TIME);
 
 	perf_event_set_state(event, PERF_EVENT_STATE_INACTIVE);
 	perf_cgroup_event_enable(event, ctx);
@@ -3079,21 +2996,25 @@ static void __perf_event_enable(struct perf_event *event,
 	if (!ctx->is_active)
 		return;
 
-	if (!event_filter_match(event))
+	if (!event_filter_match(event)) {
+		ctx_sched_in(ctx, EVENT_TIME);
 		return;
+	}
 
 	/*
 	 * If the event is in a group and isn't the group leader,
 	 * then don't put it on unless the group is on.
 	 */
-	if (leader != event && leader->state != PERF_EVENT_STATE_ACTIVE)
+	if (leader != event && leader->state != PERF_EVENT_STATE_ACTIVE) {
+		ctx_sched_in(ctx, EVENT_TIME);
 		return;
+	}
 
 	task_ctx = cpuctx->task_ctx;
 	if (ctx->task)
 		WARN_ON_ONCE(task_ctx != ctx);
 
-	ctx_resched(cpuctx, task_ctx, event->pmu_ctx->pmu, get_event_type(event));
+	ctx_resched(cpuctx, task_ctx, get_event_type(event));
 }
 
 /*
@@ -3361,14 +3282,15 @@ static void __pmu_ctx_sched_out(struct perf_event_pmu_context *pmu_ctx,
 	struct perf_event *event, *tmp;
 	struct pmu *pmu = pmu_ctx->pmu;
 
-	if (ctx->task && !(ctx->is_active & EVENT_ALL)) {
-		struct perf_cpu_pmu_context *cpc = this_cpc(pmu);
+	if (ctx->task && !ctx->is_active) {
+		struct perf_cpu_pmu_context *cpc;
 
+		cpc = this_cpu_ptr(pmu->cpu_pmu_context);
 		WARN_ON_ONCE(cpc->task_epc && cpc->task_epc != pmu_ctx);
 		cpc->task_epc = NULL;
 	}
 
-	if (!(event_type & EVENT_ALL))
+	if (!event_type)
 		return;
 
 	perf_pmu_disable(pmu);
@@ -3394,17 +3316,8 @@ static void __pmu_ctx_sched_out(struct perf_event_pmu_context *pmu_ctx,
 	perf_pmu_enable(pmu);
 }
 
-/*
- * Be very careful with the @pmu argument since this will change ctx state.
- * The @pmu argument works for ctx_resched(), because that is symmetric in
- * ctx_sched_out() / ctx_sched_in() usage and the ctx state ends up invariant.
- *
- * However, if you were to be asymmetrical, you could end up with messed up
- * state, eg. ctx->is_active cleared even though most EPCs would still actually
- * be active.
- */
 static void
-ctx_sched_out(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t event_type)
+ctx_sched_out(struct perf_event_context *ctx, enum event_type_t event_type)
 {
 	struct perf_cpu_context *cpuctx = this_cpu_ptr(&perf_cpu_context);
 	struct perf_event_pmu_context *pmu_ctx;
@@ -3435,36 +3348,34 @@ ctx_sched_out(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t
 	 *
 	 * would only update time for the pinned events.
 	 */
-	__ctx_time_update(cpuctx, ctx, ctx == &cpuctx->ctx);
-
-	/*
-	 * CPU-release for the below ->is_active store,
-	 * see __load_acquire() in perf_event_time_now()
-	 */
-	barrier();
-	ctx->is_active &= ~event_type;
-
-	if (!(ctx->is_active & EVENT_ALL)) {
+	if (is_active & EVENT_TIME) {
+		/* update (and stop) ctx time */
+		update_context_time(ctx);
+		update_cgrp_time_from_cpuctx(cpuctx, ctx == &cpuctx->ctx);
 		/*
-		 * For FROZEN, preserve TIME|FROZEN such that perf_event_time_now()
-		 * does not observe a hole. perf_ctx_unlock() will clean up.
+		 * CPU-release for the below ->is_active store,
+		 * see __load_acquire() in perf_event_time_now()
 		 */
-		if (ctx->is_active & EVENT_FROZEN)
-			ctx->is_active &= EVENT_TIME_FROZEN;
-		else
-			ctx->is_active = 0;
+		barrier();
 	}
+
+	ctx->is_active &= ~event_type;
+	if (!(ctx->is_active & EVENT_ALL))
+		ctx->is_active = 0;
 
 	if (ctx->task) {
 		WARN_ON_ONCE(cpuctx->task_ctx != ctx);
-		if (!(ctx->is_active & EVENT_ALL))
+		if (!ctx->is_active)
 			cpuctx->task_ctx = NULL;
 	}
 
 	is_active ^= ctx->is_active; /* changed bits */
 
-	for_each_epc(pmu_ctx, ctx, pmu, cgroup)
+	list_for_each_entry(pmu_ctx, &ctx->pmu_ctx_list, pmu_ctx_entry) {
+		if (cgroup && !pmu_ctx->nr_cgroups)
+			continue;
 		__pmu_ctx_sched_out(pmu_ctx, is_active);
+	}
 }
 
 /*
@@ -3568,17 +3479,52 @@ static void perf_event_sync_stat(struct perf_event_context *ctx,
 	}
 }
 
-static void perf_ctx_sched_task_cb(struct perf_event_context *ctx,
-				   struct task_struct *task, bool sched_in)
+#define double_list_for_each_entry(pos1, pos2, head1, head2, member)	\
+	for (pos1 = list_first_entry(head1, typeof(*pos1), member),	\
+	     pos2 = list_first_entry(head2, typeof(*pos2), member);	\
+	     !list_entry_is_head(pos1, head1, member) &&		\
+	     !list_entry_is_head(pos2, head2, member);			\
+	     pos1 = list_next_entry(pos1, member),			\
+	     pos2 = list_next_entry(pos2, member))
+
+static void perf_event_swap_task_ctx_data(struct perf_event_context *prev_ctx,
+					  struct perf_event_context *next_ctx)
+{
+	struct perf_event_pmu_context *prev_epc, *next_epc;
+
+	if (!prev_ctx->nr_task_data)
+		return;
+
+	double_list_for_each_entry(prev_epc, next_epc,
+				   &prev_ctx->pmu_ctx_list, &next_ctx->pmu_ctx_list,
+				   pmu_ctx_entry) {
+
+		if (WARN_ON_ONCE(prev_epc->pmu != next_epc->pmu))
+			continue;
+
+		/*
+		 * PMU specific parts of task perf context can require
+		 * additional synchronization. As an example of such
+		 * synchronization see implementation details of Intel
+		 * LBR call stack data profiling;
+		 */
+		if (prev_epc->pmu->swap_task_ctx)
+			prev_epc->pmu->swap_task_ctx(prev_epc, next_epc);
+		else
+			swap(prev_epc->task_ctx_data, next_epc->task_ctx_data);
+	}
+}
+
+static void perf_ctx_sched_task_cb(struct perf_event_context *ctx, bool sched_in)
 {
 	struct perf_event_pmu_context *pmu_ctx;
 	struct perf_cpu_pmu_context *cpc;
 
 	list_for_each_entry(pmu_ctx, &ctx->pmu_ctx_list, pmu_ctx_entry) {
-		cpc = this_cpc(pmu_ctx->pmu);
+		cpc = this_cpu_ptr(pmu_ctx->pmu->cpu_pmu_context);
 
 		if (cpc->sched_cb_usage && pmu_ctx->pmu->sched_task)
-			pmu_ctx->pmu->sched_task(pmu_ctx, task, sched_in);
+			pmu_ctx->pmu->sched_task(pmu_ctx, sched_in);
 	}
 }
 
@@ -3621,17 +3567,12 @@ perf_event_context_sched_out(struct task_struct *task, struct task_struct *next)
 
 			perf_ctx_disable(ctx, false);
 
-			/* PMIs are disabled; ctx->nr_no_switch_fast is stable. */
-			if (local_read(&ctx->nr_no_switch_fast) ||
-			    local_read(&next_ctx->nr_no_switch_fast)) {
+			/* PMIs are disabled; ctx->nr_pending is stable. */
+			if (local_read(&ctx->nr_pending) ||
+			    local_read(&next_ctx->nr_pending)) {
 				/*
 				 * Must not swap out ctx when there's pending
 				 * events that rely on the ctx->task relation.
-				 *
-				 * Likewise, when a context contains inherit +
-				 * SAMPLE_READ events they should be switched
-				 * out using the slow path so that they are
-				 * treated as if they were distinct contexts.
 				 */
 				raw_spin_unlock(&next_ctx->lock);
 				rcu_read_unlock();
@@ -3641,16 +3582,17 @@ perf_event_context_sched_out(struct task_struct *task, struct task_struct *next)
 			WRITE_ONCE(ctx->task, next);
 			WRITE_ONCE(next_ctx->task, task);
 
-			perf_ctx_sched_task_cb(ctx, task, false);
+			perf_ctx_sched_task_cb(ctx, false);
+			perf_event_swap_task_ctx_data(ctx, next_ctx);
 
 			perf_ctx_enable(ctx, false);
 
 			/*
 			 * RCU_INIT_POINTER here is safe because we've not
 			 * modified the ctx and the above modification of
-			 * ctx->task is immaterial since this value is
-			 * always verified under ctx->lock which we're now
-			 * holding.
+			 * ctx->task and ctx->task_ctx_data are immaterial
+			 * since those values are always verified under
+			 * ctx->lock which we're now holding.
 			 */
 			RCU_INIT_POINTER(task->perf_event_ctxp, next_ctx);
 			RCU_INIT_POINTER(next->perf_event_ctxp, ctx);
@@ -3670,8 +3612,8 @@ unlock:
 		perf_ctx_disable(ctx, false);
 
 inside_switch:
-		perf_ctx_sched_task_cb(ctx, task, false);
-		task_ctx_sched_out(ctx, NULL, EVENT_ALL);
+		perf_ctx_sched_task_cb(ctx, false);
+		task_ctx_sched_out(ctx, EVENT_ALL);
 
 		perf_ctx_enable(ctx, false);
 		raw_spin_unlock(&ctx->lock);
@@ -3683,7 +3625,7 @@ static DEFINE_PER_CPU(int, perf_sched_cb_usages);
 
 void perf_sched_cb_dec(struct pmu *pmu)
 {
-	struct perf_cpu_pmu_context *cpc = this_cpc(pmu);
+	struct perf_cpu_pmu_context *cpc = this_cpu_ptr(pmu->cpu_pmu_context);
 
 	this_cpu_dec(perf_sched_cb_usages);
 	barrier();
@@ -3695,7 +3637,7 @@ void perf_sched_cb_dec(struct pmu *pmu)
 
 void perf_sched_cb_inc(struct pmu *pmu)
 {
-	struct perf_cpu_pmu_context *cpc = this_cpc(pmu);
+	struct perf_cpu_pmu_context *cpc = this_cpu_ptr(pmu->cpu_pmu_context);
 
 	if (!cpc->sched_cb_usage++)
 		list_add(&cpc->sched_cb_entry, this_cpu_ptr(&sched_cb_list));
@@ -3712,8 +3654,7 @@ void perf_sched_cb_inc(struct pmu *pmu)
  * PEBS requires this to provide PID/TID information. This requires we flush
  * all queued PEBS records before we context switch to a new task.
  */
-static void __perf_pmu_sched_task(struct perf_cpu_pmu_context *cpc,
-				  struct task_struct *task, bool sched_in)
+static void __perf_pmu_sched_task(struct perf_cpu_pmu_context *cpc, bool sched_in)
 {
 	struct perf_cpu_context *cpuctx = this_cpu_ptr(&perf_cpu_context);
 	struct pmu *pmu;
@@ -3727,7 +3668,7 @@ static void __perf_pmu_sched_task(struct perf_cpu_pmu_context *cpc,
 	perf_ctx_lock(cpuctx, cpuctx->task_ctx);
 	perf_pmu_disable(pmu);
 
-	pmu->sched_task(cpc->task_epc, task, sched_in);
+	pmu->sched_task(cpc->task_epc, sched_in);
 
 	perf_pmu_enable(pmu);
 	perf_ctx_unlock(cpuctx, cpuctx->task_ctx);
@@ -3745,7 +3686,7 @@ static void perf_pmu_sched_task(struct task_struct *prev,
 		return;
 
 	list_for_each_entry(cpc, this_cpu_ptr(&sched_cb_list), sched_cb_entry)
-		__perf_pmu_sched_task(cpc, sched_in ? next : prev, sched_in);
+		__perf_pmu_sched_task(cpc, sched_in);
 }
 
 static void perf_event_switch(struct task_struct *task,
@@ -3781,7 +3722,7 @@ void __perf_event_task_sched_out(struct task_struct *task,
 	perf_cgroup_switch(next);
 }
 
-static bool perf_less_group_idx(const void *l, const void *r, void __always_unused *args)
+static bool perf_less_group_idx(const void *l, const void *r)
 {
 	const struct perf_event *le = *(const struct perf_event **)l;
 	const struct perf_event *re = *(const struct perf_event **)r;
@@ -3789,14 +3730,20 @@ static bool perf_less_group_idx(const void *l, const void *r, void __always_unus
 	return le->group_index < re->group_index;
 }
 
-DEFINE_MIN_HEAP(struct perf_event *, perf_event_min_heap);
+static void swap_ptr(void *l, void *r)
+{
+	void **lp = l, **rp = r;
+
+	swap(*lp, *rp);
+}
 
 static const struct min_heap_callbacks perf_min_heap = {
+	.elem_size = sizeof(struct perf_event *),
 	.less = perf_less_group_idx,
-	.swp = NULL,
+	.swp = swap_ptr,
 };
 
-static void __heap_add(struct perf_event_min_heap *heap, struct perf_event *event)
+static void __heap_add(struct min_heap *heap, struct perf_event *event)
 {
 	struct perf_event **itrs = heap->data;
 
@@ -3813,7 +3760,7 @@ static void __link_epc(struct perf_event_pmu_context *pmu_ctx)
 	if (!pmu_ctx->ctx->task)
 		return;
 
-	cpc = this_cpc(pmu_ctx->pmu);
+	cpc = this_cpu_ptr(pmu_ctx->pmu->cpu_pmu_context);
 	WARN_ON_ONCE(cpc->task_epc && cpc->task_epc != pmu_ctx);
 	cpc->task_epc = pmu_ctx;
 }
@@ -3830,7 +3777,7 @@ static noinline int visit_groups_merge(struct perf_event_context *ctx,
 	struct perf_cpu_context *cpuctx = NULL;
 	/* Space for per CPU and/or any CPU event iterators. */
 	struct perf_event *itrs[2];
-	struct perf_event_min_heap event_heap;
+	struct min_heap event_heap;
 	struct perf_event **evt;
 	int ret;
 
@@ -3839,7 +3786,7 @@ static noinline int visit_groups_merge(struct perf_event_context *ctx,
 
 	if (!ctx->task) {
 		cpuctx = this_cpu_ptr(&perf_cpu_context);
-		event_heap = (struct perf_event_min_heap){
+		event_heap = (struct min_heap){
 			.data = cpuctx->heap,
 			.nr = 0,
 			.size = cpuctx->heap_size,
@@ -3852,7 +3799,7 @@ static noinline int visit_groups_merge(struct perf_event_context *ctx,
 			css = &cpuctx->cgrp->css;
 #endif
 	} else {
-		event_heap = (struct perf_event_min_heap){
+		event_heap = (struct min_heap){
 			.data = itrs,
 			.nr = 0,
 			.size = ARRAY_SIZE(itrs),
@@ -3874,7 +3821,7 @@ static noinline int visit_groups_merge(struct perf_event_context *ctx,
 		perf_assert_pmu_disabled((*evt)->pmu_ctx->pmu);
 	}
 
-	min_heapify_all_inline(&event_heap, &perf_min_heap, NULL);
+	min_heapify_all(&event_heap, &perf_min_heap);
 
 	while (event_heap.nr) {
 		ret = func(*evt, data);
@@ -3883,9 +3830,9 @@ static noinline int visit_groups_merge(struct perf_event_context *ctx,
 
 		*evt = perf_event_groups_next(*evt, pmu);
 		if (*evt)
-			min_heap_sift_down_inline(&event_heap, 0, &perf_min_heap, NULL);
+			min_heapify(&event_heap, 0, &perf_min_heap);
 		else
-			min_heap_pop_inline(&event_heap, &perf_min_heap, NULL);
+			min_heap_pop(&event_heap, &perf_min_heap);
 	}
 
 	return 0;
@@ -3941,15 +3888,11 @@ static int merge_sched_in(struct perf_event *event, void *data)
 		if (event->attr.pinned) {
 			perf_cgroup_event_disable(event, ctx);
 			perf_event_set_state(event, PERF_EVENT_STATE_ERROR);
-
-			if (*perf_event_fasync(event))
-				event->pending_kill = POLL_HUP;
-
-			perf_event_wakeup(event);
 		} else {
-			struct perf_cpu_pmu_context *cpc = this_cpc(event->pmu_ctx->pmu);
+			struct perf_cpu_pmu_context *cpc;
 
 			event->pmu_ctx->rotate_necessary = 1;
+			cpc = this_cpu_ptr(event->pmu_ctx->pmu->cpu_pmu_context);
 			perf_mux_hrtimer_restart(cpc);
 			group_update_userpage(event);
 		}
@@ -3967,22 +3910,29 @@ static void pmu_groups_sched_in(struct perf_event_context *ctx,
 			   merge_sched_in, &can_add_hw);
 }
 
-static void __pmu_ctx_sched_in(struct perf_event_pmu_context *pmu_ctx,
-			       enum event_type_t event_type)
+static void ctx_groups_sched_in(struct perf_event_context *ctx,
+				struct perf_event_groups *groups,
+				bool cgroup)
 {
-	struct perf_event_context *ctx = pmu_ctx->ctx;
+	struct perf_event_pmu_context *pmu_ctx;
 
-	if (event_type & EVENT_PINNED)
-		pmu_groups_sched_in(ctx, &ctx->pinned_groups, pmu_ctx->pmu);
-	if (event_type & EVENT_FLEXIBLE)
-		pmu_groups_sched_in(ctx, &ctx->flexible_groups, pmu_ctx->pmu);
+	list_for_each_entry(pmu_ctx, &ctx->pmu_ctx_list, pmu_ctx_entry) {
+		if (cgroup && !pmu_ctx->nr_cgroups)
+			continue;
+		pmu_groups_sched_in(ctx, groups, pmu_ctx->pmu);
+	}
+}
+
+static void __pmu_ctx_sched_in(struct perf_event_context *ctx,
+			       struct pmu *pmu)
+{
+	pmu_groups_sched_in(ctx, &ctx->flexible_groups, pmu);
 }
 
 static void
-ctx_sched_in(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t event_type)
+ctx_sched_in(struct perf_event_context *ctx, enum event_type_t event_type)
 {
 	struct perf_cpu_context *cpuctx = this_cpu_ptr(&perf_cpu_context);
-	struct perf_event_pmu_context *pmu_ctx;
 	int is_active = ctx->is_active;
 	bool cgroup = event_type & EVENT_CGROUP;
 
@@ -4006,7 +3956,7 @@ ctx_sched_in(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t 
 
 	ctx->is_active |= (event_type | EVENT_TIME);
 	if (ctx->task) {
-		if (!(is_active & EVENT_ALL))
+		if (!is_active)
 			cpuctx->task_ctx = ctx;
 		else
 			WARN_ON_ONCE(cpuctx->task_ctx != ctx);
@@ -4018,16 +3968,12 @@ ctx_sched_in(struct perf_event_context *ctx, struct pmu *pmu, enum event_type_t 
 	 * First go through the list and put on any pinned groups
 	 * in order to give them the best chance of going on.
 	 */
-	if (is_active & EVENT_PINNED) {
-		for_each_epc(pmu_ctx, ctx, pmu, cgroup)
-			__pmu_ctx_sched_in(pmu_ctx, EVENT_PINNED);
-	}
+	if (is_active & EVENT_PINNED)
+		ctx_groups_sched_in(ctx, &ctx->pinned_groups, cgroup);
 
 	/* Then walk through the lower prio flexible groups */
-	if (is_active & EVENT_FLEXIBLE) {
-		for_each_epc(pmu_ctx, ctx, pmu, cgroup)
-			__pmu_ctx_sched_in(pmu_ctx, EVENT_FLEXIBLE);
-	}
+	if (is_active & EVENT_FLEXIBLE)
+		ctx_groups_sched_in(ctx, &ctx->flexible_groups, cgroup);
 }
 
 static void perf_event_context_sched_in(struct task_struct *task)
@@ -4044,7 +3990,7 @@ static void perf_event_context_sched_in(struct task_struct *task)
 		perf_ctx_lock(cpuctx, ctx);
 		perf_ctx_disable(ctx, false);
 
-		perf_ctx_sched_task_cb(ctx, task, true);
+		perf_ctx_sched_task_cb(ctx, true);
 
 		perf_ctx_enable(ctx, false);
 		perf_ctx_unlock(cpuctx, ctx);
@@ -4070,12 +4016,12 @@ static void perf_event_context_sched_in(struct task_struct *task)
 	 */
 	if (!RB_EMPTY_ROOT(&ctx->pinned_groups.tree)) {
 		perf_ctx_disable(&cpuctx->ctx, false);
-		ctx_sched_out(&cpuctx->ctx, NULL, EVENT_FLEXIBLE);
+		ctx_sched_out(&cpuctx->ctx, EVENT_FLEXIBLE);
 	}
 
-	perf_event_sched_in(cpuctx, ctx, NULL);
+	perf_event_sched_in(cpuctx, ctx);
 
-	perf_ctx_sched_task_cb(cpuctx->task_ctx, task, true);
+	perf_ctx_sched_task_cb(cpuctx->task_ctx, true);
 
 	if (!RB_EMPTY_ROOT(&ctx->pinned_groups.tree))
 		perf_ctx_enable(&cpuctx->ctx, false);
@@ -4220,14 +4166,30 @@ static void perf_adjust_period(struct perf_event *event, u64 nsec, u64 count, bo
 	}
 }
 
-static void perf_adjust_freq_unthr_events(struct list_head *event_list)
+/*
+ * combine freq adjustment with unthrottling to avoid two passes over the
+ * events. At the same time, make sure, having freq events does not change
+ * the rate of unthrottling as that would introduce bias.
+ */
+static void
+perf_adjust_freq_unthr_context(struct perf_event_context *ctx, bool unthrottle)
 {
 	struct perf_event *event;
 	struct hw_perf_event *hwc;
 	u64 now, period = TICK_NSEC;
 	s64 delta;
 
-	list_for_each_entry(event, event_list, active_list) {
+	/*
+	 * only need to iterate over all events iff:
+	 * - context have events in frequency mode (needs freq adjust)
+	 * - there are events to unthrottle on this cpu
+	 */
+	if (!(ctx->nr_freq || unthrottle))
+		return;
+
+	raw_spin_lock(&ctx->lock);
+
+	list_for_each_entry_rcu(event, &ctx->event_list, event_entry) {
 		if (event->state != PERF_EVENT_STATE_ACTIVE)
 			continue;
 
@@ -4235,17 +4197,18 @@ static void perf_adjust_freq_unthr_events(struct list_head *event_list)
 		if (!event_filter_match(event))
 			continue;
 
+		perf_pmu_disable(event->pmu);
+
 		hwc = &event->hw;
 
 		if (hwc->interrupts == MAX_INTERRUPTS) {
 			hwc->interrupts = 0;
 			perf_log_throttle(event, 1);
-			if (!event->attr.freq || !event->attr.sample_freq)
-				event->pmu->start(event, 0);
+			event->pmu->start(event, 0);
 		}
 
 		if (!event->attr.freq || !event->attr.sample_freq)
-			continue;
+			goto next;
 
 		/*
 		 * stop the event and update event->count
@@ -4267,41 +4230,8 @@ static void perf_adjust_freq_unthr_events(struct list_head *event_list)
 			perf_adjust_period(event, period, delta, false);
 
 		event->pmu->start(event, delta > 0 ? PERF_EF_RELOAD : 0);
-	}
-}
-
-/*
- * combine freq adjustment with unthrottling to avoid two passes over the
- * events. At the same time, make sure, having freq events does not change
- * the rate of unthrottling as that would introduce bias.
- */
-static void
-perf_adjust_freq_unthr_context(struct perf_event_context *ctx, bool unthrottle)
-{
-	struct perf_event_pmu_context *pmu_ctx;
-
-	/*
-	 * only need to iterate over all events iff:
-	 * - context have events in frequency mode (needs freq adjust)
-	 * - there are events to unthrottle on this cpu
-	 */
-	if (!(ctx->nr_freq || unthrottle))
-		return;
-
-	raw_spin_lock(&ctx->lock);
-
-	list_for_each_entry(pmu_ctx, &ctx->pmu_ctx_list, pmu_ctx_entry) {
-		if (!(pmu_ctx->nr_freq || unthrottle))
-			continue;
-		if (!perf_pmu_ctx_is_active(pmu_ctx))
-			continue;
-		if (pmu_ctx->pmu->capabilities & PERF_PMU_CAP_NO_INTERRUPT)
-			continue;
-
-		perf_pmu_disable(pmu_ctx->pmu);
-		perf_adjust_freq_unthr_events(&pmu_ctx->pinned_active);
-		perf_adjust_freq_unthr_events(&pmu_ctx->flexible_active);
-		perf_pmu_enable(pmu_ctx->pmu);
+	next:
+		perf_pmu_enable(event->pmu);
 	}
 
 	raw_spin_unlock(&ctx->lock);
@@ -4418,14 +4348,14 @@ static bool perf_rotate_context(struct perf_cpu_pmu_context *cpc)
 		update_context_time(&cpuctx->ctx);
 		__pmu_ctx_sched_out(cpu_epc, EVENT_FLEXIBLE);
 		rotate_ctx(&cpuctx->ctx, cpu_event);
-		__pmu_ctx_sched_in(cpu_epc, EVENT_FLEXIBLE);
+		__pmu_ctx_sched_in(&cpuctx->ctx, pmu);
 	}
 
 	if (task_event)
 		rotate_ctx(task_epc->ctx, task_event);
 
 	if (task_event || (task_epc && cpu_event))
-		__pmu_ctx_sched_in(task_epc, EVENT_FLEXIBLE);
+		__pmu_ctx_sched_in(task_epc->ctx, pmu);
 
 	perf_pmu_enable(pmu);
 	perf_ctx_unlock(cpuctx, cpuctx->task_ctx);
@@ -4491,7 +4421,7 @@ static void perf_event_enable_on_exec(struct perf_event_context *ctx)
 
 	cpuctx = this_cpu_ptr(&perf_cpu_context);
 	perf_ctx_lock(cpuctx, ctx);
-	ctx_time_freeze(cpuctx, ctx);
+	ctx_sched_out(ctx, EVENT_TIME);
 
 	list_for_each_entry(event, &ctx->event_list, event_entry) {
 		enabled |= event_enable_on_exec(event, ctx);
@@ -4503,7 +4433,9 @@ static void perf_event_enable_on_exec(struct perf_event_context *ctx)
 	 */
 	if (enabled) {
 		clone_ctx = unclone_ctx(ctx);
-		ctx_resched(cpuctx, ctx, NULL, event_type);
+		ctx_resched(cpuctx, ctx, event_type);
+	} else {
+		ctx_sched_in(ctx, EVENT_TIME);
 	}
 	perf_ctx_unlock(cpuctx, ctx);
 
@@ -4564,24 +4496,13 @@ struct perf_read_data {
 	int ret;
 };
 
-static inline const struct cpumask *perf_scope_cpu_topology_cpumask(unsigned int scope, int cpu);
-
 static int __perf_event_read_cpu(struct perf_event *event, int event_cpu)
 {
-	int local_cpu = smp_processor_id();
 	u16 local_pkg, event_pkg;
 
-	if ((unsigned)event_cpu >= nr_cpu_ids)
-		return event_cpu;
-
-	if (event->group_caps & PERF_EV_CAP_READ_SCOPE) {
-		const struct cpumask *cpumask = perf_scope_cpu_topology_cpumask(event->pmu->scope, event_cpu);
-
-		if (cpumask && cpumask_test_cpu(local_cpu, cpumask))
-			return local_cpu;
-	}
-
 	if (event->group_caps & PERF_EV_CAP_READ_ACTIVE_PKG) {
+		int local_cpu = smp_processor_id();
+
 		event_pkg = topology_physical_package_id(event_cpu);
 		local_pkg = topology_physical_package_id(local_cpu);
 
@@ -4614,7 +4535,10 @@ static void __perf_event_read(void *info)
 		return;
 
 	raw_spin_lock(&ctx->lock);
-	ctx_time_update_event(ctx, event);
+	if (ctx->is_active & EVENT_TIME) {
+		update_context_time(ctx);
+		update_cgrp_time_from_event(event);
+	}
 
 	perf_event_update_time(event);
 	if (data->group)
@@ -4642,11 +4566,8 @@ unlock:
 	raw_spin_unlock(&ctx->lock);
 }
 
-static inline u64 perf_event_count(struct perf_event *event, bool self)
+static inline u64 perf_event_count(struct perf_event *event)
 {
-	if (self)
-		return local64_read(&event->count);
-
 	return local64_read(&event->count) + atomic64_read(&event->child_count);
 }
 
@@ -4674,8 +4595,6 @@ int perf_event_read_local(struct perf_event *event, u64 *value,
 			  u64 *enabled, u64 *running)
 {
 	unsigned long flags;
-	int event_oncpu;
-	int event_cpu;
 	int ret = 0;
 
 	/*
@@ -4700,22 +4619,15 @@ int perf_event_read_local(struct perf_event *event, u64 *value,
 		goto out;
 	}
 
-	/*
-	 * Get the event CPU numbers, and adjust them to local if the event is
-	 * a per-package event that can be read locally
-	 */
-	event_oncpu = __perf_event_read_cpu(event, event->oncpu);
-	event_cpu = __perf_event_read_cpu(event, event->cpu);
-
 	/* If this is a per-CPU event, it must be for this CPU */
 	if (!(event->attach_state & PERF_ATTACH_TASK) &&
-	    event_cpu != smp_processor_id()) {
+	    event->cpu != smp_processor_id()) {
 		ret = -EINVAL;
 		goto out;
 	}
 
 	/* If this is a pinned event it must be running on this CPU */
-	if (event->attr.pinned && event_oncpu != smp_processor_id()) {
+	if (event->attr.pinned && event->oncpu != smp_processor_id()) {
 		ret = -EBUSY;
 		goto out;
 	}
@@ -4725,7 +4637,7 @@ int perf_event_read_local(struct perf_event *event, u64 *value,
 	 * or local to this CPU. Furthermore it means its ACTIVE (otherwise
 	 * oncpu == -1).
 	 */
-	if (event_oncpu == smp_processor_id())
+	if (event->oncpu == smp_processor_id())
 		event->pmu->read(event);
 
 	*value = local64_read(&event->count);
@@ -4807,7 +4719,10 @@ again:
 		 * May read while context is not active (e.g., thread is
 		 * blocked), in that case we cannot update context time
 		 */
-		ctx_time_update_event(ctx, event);
+		if (ctx->is_active & EVENT_TIME) {
+			update_context_time(ctx);
+			update_cgrp_time_from_event(event);
+		}
 
 		perf_event_update_time(event);
 		if (group)
@@ -4891,7 +4806,7 @@ find_get_context(struct task_struct *task, struct perf_event *event)
 
 	if (!task) {
 		/* Must be root to operate on a CPU event: */
-		err = perf_allow_cpu();
+		err = perf_allow_cpu(&event->attr);
 		if (err)
 			return ERR_PTR(err);
 
@@ -4959,6 +4874,7 @@ find_get_pmu_context(struct pmu *pmu, struct perf_event_context *ctx,
 		     struct perf_event *event)
 {
 	struct perf_event_pmu_context *new = NULL, *pos = NULL, *epc;
+	void *task_ctx_data = NULL;
 
 	if (!ctx->task) {
 		/*
@@ -4968,14 +4884,11 @@ find_get_pmu_context(struct pmu *pmu, struct perf_event_context *ctx,
 		 */
 		struct perf_cpu_pmu_context *cpc;
 
-		cpc = *per_cpu_ptr(pmu->cpu_pmu_context, event->cpu);
+		cpc = per_cpu_ptr(pmu->cpu_pmu_context, event->cpu);
 		epc = &cpc->epc;
 		raw_spin_lock_irq(&ctx->lock);
 		if (!epc->ctx) {
-			/*
-			 * One extra reference for the pmu; see perf_pmu_free().
-			 */
-			atomic_set(&epc->refcount, 2);
+			atomic_set(&epc->refcount, 1);
 			epc->embedded = 1;
 			list_add(&epc->pmu_ctx_entry, &ctx->pmu_ctx_list);
 			epc->ctx = ctx;
@@ -4990,6 +4903,14 @@ find_get_pmu_context(struct pmu *pmu, struct perf_event_context *ctx,
 	new = kzalloc(sizeof(*epc), GFP_KERNEL);
 	if (!new)
 		return ERR_PTR(-ENOMEM);
+
+	if (event->attach_state & PERF_ATTACH_TASK_DATA) {
+		task_ctx_data = alloc_task_ctx_data(pmu);
+		if (!task_ctx_data) {
+			kfree(new);
+			return ERR_PTR(-ENOMEM);
+		}
+	}
 
 	__perf_init_event_pmu_context(new, pmu);
 
@@ -5025,7 +4946,14 @@ find_get_pmu_context(struct pmu *pmu, struct perf_event_context *ctx,
 	epc->ctx = ctx;
 
 found_epc:
+	if (task_ctx_data && !epc->task_ctx_data) {
+		epc->task_ctx_data = task_ctx_data;
+		task_ctx_data = NULL;
+		ctx->nr_task_data++;
+	}
 	raw_spin_unlock_irq(&ctx->lock);
+
+	free_task_ctx_data(pmu, task_ctx_data);
 	kfree(new);
 
 	return epc;
@@ -5036,18 +4964,11 @@ static void get_pmu_ctx(struct perf_event_pmu_context *epc)
 	WARN_ON_ONCE(!atomic_inc_not_zero(&epc->refcount));
 }
 
-static void free_cpc_rcu(struct rcu_head *head)
-{
-	struct perf_cpu_pmu_context *cpc =
-		container_of(head, typeof(*cpc), epc.rcu_head);
-
-	kfree(cpc);
-}
-
 static void free_epc_rcu(struct rcu_head *head)
 {
 	struct perf_event_pmu_context *epc = container_of(head, typeof(*epc), rcu_head);
 
+	kfree(epc->task_ctx_data);
 	kfree(epc);
 }
 
@@ -5077,10 +4998,8 @@ static void put_pmu_ctx(struct perf_event_pmu_context *epc)
 
 	raw_spin_unlock_irqrestore(&ctx->lock, flags);
 
-	if (epc->embedded) {
-		call_rcu(&epc->rcu_head, free_cpc_rcu);
+	if (epc->embedded)
 		return;
-	}
 
 	call_rcu(&epc->rcu_head, free_epc_rcu);
 }
@@ -5154,225 +5073,6 @@ static void unaccount_freq_event(void)
 		unaccount_freq_event_nohz();
 	else
 		atomic_dec(&nr_freq_events);
-}
-
-
-static struct perf_ctx_data *
-alloc_perf_ctx_data(struct kmem_cache *ctx_cache, bool global)
-{
-	struct perf_ctx_data *cd;
-
-	cd = kzalloc(sizeof(*cd), GFP_KERNEL);
-	if (!cd)
-		return NULL;
-
-	cd->data = kmem_cache_zalloc(ctx_cache, GFP_KERNEL);
-	if (!cd->data) {
-		kfree(cd);
-		return NULL;
-	}
-
-	cd->global = global;
-	cd->ctx_cache = ctx_cache;
-	refcount_set(&cd->refcount, 1);
-
-	return cd;
-}
-
-static void free_perf_ctx_data(struct perf_ctx_data *cd)
-{
-	kmem_cache_free(cd->ctx_cache, cd->data);
-	kfree(cd);
-}
-
-static void __free_perf_ctx_data_rcu(struct rcu_head *rcu_head)
-{
-	struct perf_ctx_data *cd;
-
-	cd = container_of(rcu_head, struct perf_ctx_data, rcu_head);
-	free_perf_ctx_data(cd);
-}
-
-static inline void perf_free_ctx_data_rcu(struct perf_ctx_data *cd)
-{
-	call_rcu(&cd->rcu_head, __free_perf_ctx_data_rcu);
-}
-
-static int
-attach_task_ctx_data(struct task_struct *task, struct kmem_cache *ctx_cache,
-		     bool global)
-{
-	struct perf_ctx_data *cd, *old = NULL;
-
-	cd = alloc_perf_ctx_data(ctx_cache, global);
-	if (!cd)
-		return -ENOMEM;
-
-	for (;;) {
-		if (try_cmpxchg((struct perf_ctx_data **)&task->perf_ctx_data, &old, cd)) {
-			if (old)
-				perf_free_ctx_data_rcu(old);
-			return 0;
-		}
-
-		if (!old) {
-			/*
-			 * After seeing a dead @old, we raced with
-			 * removal and lost, try again to install @cd.
-			 */
-			continue;
-		}
-
-		if (refcount_inc_not_zero(&old->refcount)) {
-			free_perf_ctx_data(cd); /* unused */
-			return 0;
-		}
-
-		/*
-		 * @old is a dead object, refcount==0 is stable, try and
-		 * replace it with @cd.
-		 */
-	}
-	return 0;
-}
-
-static void __detach_global_ctx_data(void);
-DEFINE_STATIC_PERCPU_RWSEM(global_ctx_data_rwsem);
-static refcount_t global_ctx_data_ref;
-
-static int
-attach_global_ctx_data(struct kmem_cache *ctx_cache)
-{
-	struct task_struct *g, *p;
-	struct perf_ctx_data *cd;
-	int ret;
-
-	if (refcount_inc_not_zero(&global_ctx_data_ref))
-		return 0;
-
-	guard(percpu_write)(&global_ctx_data_rwsem);
-	if (refcount_inc_not_zero(&global_ctx_data_ref))
-		return 0;
-again:
-	/* Allocate everything */
-	scoped_guard (rcu) {
-		for_each_process_thread(g, p) {
-			cd = rcu_dereference(p->perf_ctx_data);
-			if (cd && !cd->global) {
-				cd->global = 1;
-				if (!refcount_inc_not_zero(&cd->refcount))
-					cd = NULL;
-			}
-			if (!cd) {
-				get_task_struct(p);
-				goto alloc;
-			}
-		}
-	}
-
-	refcount_set(&global_ctx_data_ref, 1);
-
-	return 0;
-alloc:
-	ret = attach_task_ctx_data(p, ctx_cache, true);
-	put_task_struct(p);
-	if (ret) {
-		__detach_global_ctx_data();
-		return ret;
-	}
-	goto again;
-}
-
-static int
-attach_perf_ctx_data(struct perf_event *event)
-{
-	struct task_struct *task = event->hw.target;
-	struct kmem_cache *ctx_cache = event->pmu->task_ctx_cache;
-	int ret;
-
-	if (!ctx_cache)
-		return -ENOMEM;
-
-	if (task)
-		return attach_task_ctx_data(task, ctx_cache, false);
-
-	ret = attach_global_ctx_data(ctx_cache);
-	if (ret)
-		return ret;
-
-	event->attach_state |= PERF_ATTACH_GLOBAL_DATA;
-	return 0;
-}
-
-static void
-detach_task_ctx_data(struct task_struct *p)
-{
-	struct perf_ctx_data *cd;
-
-	scoped_guard (rcu) {
-		cd = rcu_dereference(p->perf_ctx_data);
-		if (!cd || !refcount_dec_and_test(&cd->refcount))
-			return;
-	}
-
-	/*
-	 * The old ctx_data may be lost because of the race.
-	 * Nothing is required to do for the case.
-	 * See attach_task_ctx_data().
-	 */
-	if (try_cmpxchg((struct perf_ctx_data **)&p->perf_ctx_data, &cd, NULL))
-		perf_free_ctx_data_rcu(cd);
-}
-
-static void __detach_global_ctx_data(void)
-{
-	struct task_struct *g, *p;
-	struct perf_ctx_data *cd;
-
-again:
-	scoped_guard (rcu) {
-		for_each_process_thread(g, p) {
-			cd = rcu_dereference(p->perf_ctx_data);
-			if (!cd || !cd->global)
-				continue;
-			cd->global = 0;
-			get_task_struct(p);
-			goto detach;
-		}
-	}
-	return;
-detach:
-	detach_task_ctx_data(p);
-	put_task_struct(p);
-	goto again;
-}
-
-static void detach_global_ctx_data(void)
-{
-	if (refcount_dec_not_one(&global_ctx_data_ref))
-		return;
-
-	guard(percpu_write)(&global_ctx_data_rwsem);
-	if (!refcount_dec_and_test(&global_ctx_data_ref))
-		return;
-
-	/* remove everything */
-	__detach_global_ctx_data();
-}
-
-static void detach_perf_ctx_data(struct perf_event *event)
-{
-	struct task_struct *task = event->hw.target;
-
-	event->attach_state &= ~PERF_ATTACH_TASK_DATA;
-
-	if (task)
-		return detach_task_ctx_data(task);
-
-	if (event->attach_state & PERF_ATTACH_GLOBAL_DATA) {
-		detach_global_ctx_data();
-		event->attach_state &= ~PERF_ATTACH_GLOBAL_DATA;
-	}
 }
 
 static void unaccount_event(struct perf_event *event)
@@ -5469,8 +5169,6 @@ static int exclusive_event_init(struct perf_event *event)
 			return -EBUSY;
 	}
 
-	event->attach_state |= PERF_ATTACH_EXCLUSIVE;
-
 	return 0;
 }
 
@@ -5478,13 +5176,14 @@ static void exclusive_event_destroy(struct perf_event *event)
 {
 	struct pmu *pmu = event->pmu;
 
+	if (!is_exclusive_pmu(pmu))
+		return;
+
 	/* see comment in exclusive_event_init() */
 	if (event->attach_state & PERF_ATTACH_TASK)
 		atomic_dec(&pmu->exclusive_cnt);
 	else
 		atomic_inc(&pmu->exclusive_cnt);
-
-	event->attach_state &= ~PERF_ATTACH_EXCLUSIVE;
 }
 
 static bool exclusive_event_match(struct perf_event *e1, struct perf_event *e2)
@@ -5516,65 +5215,12 @@ static bool exclusive_event_installable(struct perf_event *event,
 	return true;
 }
 
-static void perf_free_addr_filters(struct perf_event *event);
+static void perf_addr_filters_splice(struct perf_event *event,
+				       struct list_head *head);
 
-/* vs perf_event_alloc() error */
-static void __free_event(struct perf_event *event)
-{
-	if (event->attach_state & PERF_ATTACH_CALLCHAIN)
-		put_callchain_buffers();
-
-	kfree(event->addr_filter_ranges);
-
-	if (event->attach_state & PERF_ATTACH_EXCLUSIVE)
-		exclusive_event_destroy(event);
-
-	if (is_cgroup_event(event))
-		perf_detach_cgroup(event);
-
-	if (event->attach_state & PERF_ATTACH_TASK_DATA)
-		detach_perf_ctx_data(event);
-
-	if (event->destroy)
-		event->destroy(event);
-
-	/*
-	 * Must be after ->destroy(), due to uprobe_perf_close() using
-	 * hw.target.
-	 */
-	if (event->hw.target)
-		put_task_struct(event->hw.target);
-
-	if (event->pmu_ctx) {
-		/*
-		 * put_pmu_ctx() needs an event->ctx reference, because of
-		 * epc->ctx.
-		 */
-		WARN_ON_ONCE(!event->ctx);
-		WARN_ON_ONCE(event->pmu_ctx->ctx != event->ctx);
-		put_pmu_ctx(event->pmu_ctx);
-	}
-
-	/*
-	 * perf_event_free_task() relies on put_ctx() being 'last', in
-	 * particular all task references must be cleaned up.
-	 */
-	if (event->ctx)
-		put_ctx(event->ctx);
-
-	if (event->pmu)
-		module_put(event->pmu->module);
-
-	call_rcu(&event->rcu_head, free_event_rcu);
-}
-
-DEFINE_FREE(__free_event, struct perf_event *, if (_T) __free_event(_T))
-
-/* vs perf_event_alloc() success */
 static void _free_event(struct perf_event *event)
 {
 	irq_work_sync(&event->pending_irq);
-	irq_work_sync(&event->pending_disable_irq);
 
 	unaccount_event(event);
 
@@ -5592,10 +5238,42 @@ static void _free_event(struct perf_event *event)
 		mutex_unlock(&event->mmap_mutex);
 	}
 
-	perf_event_free_bpf_prog(event);
-	perf_free_addr_filters(event);
+	if (is_cgroup_event(event))
+		perf_detach_cgroup(event);
 
-	__free_event(event);
+	if (!event->parent) {
+		if (event->attr.sample_type & PERF_SAMPLE_CALLCHAIN)
+			put_callchain_buffers();
+	}
+
+	perf_event_free_bpf_prog(event);
+	perf_addr_filters_splice(event, NULL);
+	kfree(event->addr_filter_ranges);
+
+	if (event->destroy)
+		event->destroy(event);
+
+	/*
+	 * Must be after ->destroy(), due to uprobe_perf_close() using
+	 * hw.target.
+	 */
+	if (event->hw.target)
+		put_task_struct(event->hw.target);
+
+	if (event->pmu_ctx)
+		put_pmu_ctx(event->pmu_ctx);
+
+	/*
+	 * perf_event_free_task() relies on put_ctx() being 'last', in particular
+	 * all task references must be cleaned up.
+	 */
+	if (event->ctx)
+		put_ctx(event->ctx);
+
+	exclusive_event_destroy(event);
+	module_put(event->pmu->module);
+
+	call_rcu(&event->rcu_head, free_event_rcu);
 }
 
 /*
@@ -5827,7 +5505,7 @@ static u64 __perf_event_read_value(struct perf_event *event, u64 *enabled, u64 *
 	mutex_lock(&event->child_mutex);
 
 	(void)perf_event_read(event, false);
-	total += perf_event_count(event, false);
+	total += perf_event_count(event);
 
 	*enabled += event->total_time_enabled +
 			atomic64_read(&event->child_total_time_enabled);
@@ -5836,7 +5514,7 @@ static u64 __perf_event_read_value(struct perf_event *event, u64 *enabled, u64 *
 
 	list_for_each_entry(child, &event->child_list, child_list) {
 		(void)perf_event_read(child, false);
-		total += perf_event_count(child, false);
+		total += perf_event_count(child);
 		*enabled += child->total_time_enabled;
 		*running += child->total_time_running;
 	}
@@ -5918,14 +5596,14 @@ static int __perf_read_group_add(struct perf_event *leader,
 	/*
 	 * Write {count,id} tuples for every sibling.
 	 */
-	values[n++] += perf_event_count(leader, false);
+	values[n++] += perf_event_count(leader);
 	if (read_format & PERF_FORMAT_ID)
 		values[n++] = primary_event_id(leader);
 	if (read_format & PERF_FORMAT_LOST)
 		values[n++] = atomic64_read(&leader->lost_samples);
 
 	for_each_sibling_event(sub, leader) {
-		values[n++] += perf_event_count(sub, false);
+		values[n++] += perf_event_count(sub);
 		if (read_format & PERF_FORMAT_ID)
 			values[n++] = primary_event_id(sub);
 		if (read_format & PERF_FORMAT_LOST)
@@ -6071,10 +5749,6 @@ static __poll_t perf_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &event->waitq, wait);
 
 	if (is_event_hup(event))
-		return events;
-
-	if (unlikely(READ_ONCE(event->state) == PERF_EVENT_STATE_ERROR &&
-		     event->attr.pinned))
 		return events;
 
 	/*
@@ -6229,9 +5903,18 @@ EXPORT_SYMBOL_GPL(perf_event_period);
 
 static const struct file_operations perf_fops;
 
-static inline bool is_perf_file(struct fd f)
+static inline int perf_fget_light(int fd, struct fd *p)
 {
-	return !fd_empty(f) && fd_file(f)->f_op == &perf_fops;
+	struct fd f = fdget(fd);
+	if (!f.file)
+		return -EBADF;
+
+	if (f.file->f_op != &perf_fops) {
+		fdput(f);
+		return -EBADF;
+	}
+	*p = f;
+	return 0;
 }
 
 static int perf_event_set_output(struct perf_event *event,
@@ -6239,6 +5922,9 @@ static int perf_event_set_output(struct perf_event *event,
 static int perf_event_set_filter(struct perf_event *event, void __user *arg);
 static int perf_copy_attr(struct perf_event_attr __user *uattr,
 			  struct perf_event_attr *attr);
+static int __perf_event_set_bpf_prog(struct perf_event *event,
+				     struct bpf_prog *prog,
+				     u64 bpf_cookie);
 
 static long _perf_ioctl(struct perf_event *event, unsigned int cmd, unsigned long arg)
 {
@@ -6279,14 +5965,20 @@ static long _perf_ioctl(struct perf_event *event, unsigned int cmd, unsigned lon
 
 	case PERF_EVENT_IOC_SET_OUTPUT:
 	{
-		CLASS(fd, output)(arg);	     // arg == -1 => empty
-		struct perf_event *output_event = NULL;
+		int ret;
 		if (arg != -1) {
-			if (!is_perf_file(output))
-				return -EBADF;
-			output_event = fd_file(output)->private_data;
+			struct perf_event *output_event;
+			struct fd output;
+			ret = perf_fget_light(arg, &output);
+			if (ret)
+				return ret;
+			output_event = output.file->private_data;
+			ret = perf_event_set_output(event, output_event);
+			fdput(output);
+		} else {
+			ret = perf_event_set_output(event, NULL);
 		}
-		return perf_event_set_output(event, output_event);
+		return ret;
 	}
 
 	case PERF_EVENT_IOC_SET_FILTER:
@@ -6301,7 +5993,7 @@ static long _perf_ioctl(struct perf_event *event, unsigned int cmd, unsigned lon
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
 
-		err = perf_event_set_bpf_prog(event, prog, 0);
+		err = __perf_event_set_bpf_prog(event, prog, 0);
 		if (err) {
 			bpf_prog_put(prog);
 			return err;
@@ -6495,7 +6187,7 @@ void perf_event_update_userpage(struct perf_event *event)
 	++userpg->lock;
 	barrier();
 	userpg->index = perf_event_index(event);
-	userpg->offset = perf_event_count(event, false);
+	userpg->offset = perf_event_count(event);
 	if (userpg->index)
 		userpg->offset -= local64_read(&event->hw.prev_count);
 
@@ -6514,6 +6206,41 @@ unlock:
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(perf_event_update_userpage);
+
+static vm_fault_t perf_mmap_fault(struct vm_fault *vmf)
+{
+	struct perf_event *event = vmf->vma->vm_file->private_data;
+	struct perf_buffer *rb;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
+
+	if (vmf->flags & FAULT_FLAG_MKWRITE) {
+		if (vmf->pgoff == 0)
+			ret = 0;
+		return ret;
+	}
+
+	rcu_read_lock();
+	rb = rcu_dereference(event->rb);
+	if (!rb)
+		goto unlock;
+
+	if (vmf->pgoff && (vmf->flags & FAULT_FLAG_WRITE))
+		goto unlock;
+
+	vmf->page = perf_mmap_to_page(rb, vmf->pgoff);
+	if (!vmf->page)
+		goto unlock;
+
+	get_page(vmf->page);
+	vmf->page->mapping = vmf->vma->vm_file->f_mapping;
+	vmf->page->index   = vmf->pgoff;
+
+	ret = 0;
+unlock:
+	rcu_read_unlock();
+
+	return ret;
+}
 
 static void ring_buffer_attach(struct perf_event *event,
 			       struct perf_buffer *rb)
@@ -6754,86 +6481,22 @@ out_put:
 	ring_buffer_put(rb); /* could be last */
 }
 
-static vm_fault_t perf_mmap_pfn_mkwrite(struct vm_fault *vmf)
+static int perf_mmap_may_split(struct vm_area_struct *vma, unsigned long addr)
 {
-	/* The first page is the user control page, others are read-only. */
-	return vmf->pgoff == 0 ? 0 : VM_FAULT_SIGBUS;
+	/*
+	 * Forbid splitting perf mappings to prevent refcount leaks due to
+	 * the resulting non-matching offsets and sizes. See open()/close().
+	 */
+	return -EINVAL;
 }
 
 static const struct vm_operations_struct perf_mmap_vmops = {
 	.open		= perf_mmap_open,
 	.close		= perf_mmap_close, /* non mergeable */
-	.pfn_mkwrite	= perf_mmap_pfn_mkwrite,
+	.fault		= perf_mmap_fault,
+	.page_mkwrite	= perf_mmap_fault,
+	.may_split	= perf_mmap_may_split,
 };
-
-static int map_range(struct perf_buffer *rb, struct vm_area_struct *vma)
-{
-	unsigned long nr_pages = vma_pages(vma);
-	int err = 0;
-	unsigned long pagenum;
-
-	/*
-	 * We map this as a VM_PFNMAP VMA.
-	 *
-	 * This is not ideal as this is designed broadly for mappings of PFNs
-	 * referencing memory-mapped I/O ranges or non-system RAM i.e. for which
-	 * !pfn_valid(pfn).
-	 *
-	 * We are mapping kernel-allocated memory (memory we manage ourselves)
-	 * which would more ideally be mapped using vm_insert_page() or a
-	 * similar mechanism, that is as a VM_MIXEDMAP mapping.
-	 *
-	 * However this won't work here, because:
-	 *
-	 * 1. It uses vma->vm_page_prot, but this field has not been completely
-	 *    setup at the point of the f_op->mmp() hook, so we are unable to
-	 *    indicate that this should be mapped CoW in order that the
-	 *    mkwrite() hook can be invoked to make the first page R/W and the
-	 *    rest R/O as desired.
-	 *
-	 * 2. Anything other than a VM_PFNMAP of valid PFNs will result in
-	 *    vm_normal_page() returning a struct page * pointer, which means
-	 *    vm_ops->page_mkwrite() will be invoked rather than
-	 *    vm_ops->pfn_mkwrite(), and this means we have to set page->mapping
-	 *    to work around retry logic in the fault handler, however this
-	 *    field is no longer allowed to be used within struct page.
-	 *
-	 * 3. Having a struct page * made available in the fault logic also
-	 *    means that the page gets put on the rmap and becomes
-	 *    inappropriately accessible and subject to map and ref counting.
-	 *
-	 * Ideally we would have a mechanism that could explicitly express our
-	 * desires, but this is not currently the case, so we instead use
-	 * VM_PFNMAP.
-	 *
-	 * We manage the lifetime of these mappings with internal refcounts (see
-	 * perf_mmap_open() and perf_mmap_close()) so we ensure the lifetime of
-	 * this mapping is maintained correctly.
-	 */
-	for (pagenum = 0; pagenum < nr_pages; pagenum++) {
-		unsigned long va = vma->vm_start + PAGE_SIZE * pagenum;
-		struct page *page = perf_mmap_to_page(rb, vma->vm_pgoff + pagenum);
-
-		if (page == NULL) {
-			err = -EINVAL;
-			break;
-		}
-
-		/* Map readonly, perf_mmap_pfn_mkwrite() called on write fault. */
-		err = remap_pfn_range(vma, va, page_to_pfn(page), PAGE_SIZE,
-				      vm_get_page_prot(vma->vm_flags & ~VM_SHARED));
-		if (err)
-			break;
-	}
-
-#ifdef CONFIG_MMU
-	/* Clear any partial mappings on error. */
-	if (err)
-		zap_page_range_single(vma, vma->vm_start, nr_pages * PAGE_SIZE, NULL);
-#endif
-
-	return err;
-}
 
 static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 {
@@ -6846,7 +6509,7 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 	unsigned long vma_size;
 	unsigned long nr_pages;
 	long user_extra = 0, extra = 0;
-	int ret, flags = 0;
+	int ret = 0, flags = 0;
 
 	/*
 	 * Don't allow mmap() of inherited per-task counters. This would
@@ -6864,54 +6527,9 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		return ret;
 
 	vma_size = vma->vm_end - vma->vm_start;
-	nr_pages = vma_size / PAGE_SIZE;
-
-	if (nr_pages > INT_MAX)
-		return -ENOMEM;
-
-	if (vma_size != PAGE_SIZE * nr_pages)
-		return -EINVAL;
-
-	user_extra = nr_pages;
-
-	mutex_lock(&event->mmap_mutex);
-	ret = -EINVAL;
 
 	if (vma->vm_pgoff == 0) {
-		nr_pages -= 1;
-
-		/*
-		 * If we have rb pages ensure they're a power-of-two number, so we
-		 * can do bitmasks instead of modulo.
-		 */
-		if (nr_pages != 0 && !is_power_of_2(nr_pages))
-			goto unlock;
-
-		WARN_ON_ONCE(event->ctx->parent_ctx);
-
-		if (event->rb) {
-			if (data_page_nr(event->rb) != nr_pages)
-				goto unlock;
-
-			if (atomic_inc_not_zero(&event->rb->mmap_count)) {
-				/*
-				 * Success -- managed to mmap() the same buffer
-				 * multiple times.
-				 */
-				ret = 0;
-				/* We need the rb to map pages. */
-				rb = event->rb;
-				goto unlock;
-			}
-
-			/*
-			 * Raced against perf_mmap_close()'s
-			 * atomic_dec_and_mutex_lock() remove the
-			 * event and continue as if !event->rb
-			 */
-			ring_buffer_attach(event, NULL);
-		}
-
+		nr_pages = (vma_size / PAGE_SIZE) - 1;
 	} else {
 		/*
 		 * AUX area mapping: if rb->aux_nr_pages != 0, it's already
@@ -6919,6 +6537,16 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		 * and offset. Must be above the normal perf buffer.
 		 */
 		u64 aux_offset, aux_size;
+
+		if (!event->rb)
+			return -EINVAL;
+
+		nr_pages = vma_size / PAGE_SIZE;
+		if (nr_pages > INT_MAX)
+			return -ENOMEM;
+
+		mutex_lock(&event->mmap_mutex);
+		ret = -EINVAL;
 
 		rb = event->rb;
 		if (!rb)
@@ -6960,8 +6588,46 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		}
 
 		atomic_set(&rb->aux_mmap_count, 1);
+		user_extra = nr_pages;
+
+		goto accounting;
 	}
 
+	/*
+	 * If we have rb pages ensure they're a power-of-two number, so we
+	 * can do bitmasks instead of modulo.
+	 */
+	if (nr_pages != 0 && !is_power_of_2(nr_pages))
+		return -EINVAL;
+
+	if (vma_size != PAGE_SIZE * (1 + nr_pages))
+		return -EINVAL;
+
+	WARN_ON_ONCE(event->ctx->parent_ctx);
+again:
+	mutex_lock(&event->mmap_mutex);
+	if (event->rb) {
+		if (data_page_nr(event->rb) != nr_pages) {
+			ret = -EINVAL;
+			goto unlock;
+		}
+
+		if (!atomic_inc_not_zero(&event->rb->mmap_count)) {
+			/*
+			 * Raced against perf_mmap_close(); remove the
+			 * event and try again.
+			 */
+			ring_buffer_attach(event, NULL);
+			mutex_unlock(&event->mmap_mutex);
+			goto again;
+		}
+
+		goto unlock;
+	}
+
+	user_extra = nr_pages + 1;
+
+accounting:
 	user_lock_limit = sysctl_perf_event_mlock >> (PAGE_SHIFT - 10);
 
 	/*
@@ -7029,8 +6695,6 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 			rb->aux_mmap_locked = extra;
 	}
 
-	ret = 0;
-
 unlock:
 	if (!ret) {
 		atomic_long_add(user_extra, &user->locked_vm);
@@ -7052,10 +6716,7 @@ aux_unlock:
 	vm_flags_set(vma, VM_DONTCOPY | VM_DONTEXPAND | VM_DONTDUMP);
 	vma->vm_ops = &perf_mmap_vmops;
 
-	if (!ret)
-		ret = map_range(rb, vma);
-
-	if (!ret && event->pmu->event_mapped)
+	if (event->pmu->event_mapped)
 		event->pmu->event_mapped(event, vma->vm_mm);
 
 	return ret;
@@ -7078,6 +6739,7 @@ static int perf_fasync(int fd, struct file *filp, int on)
 }
 
 static const struct file_operations perf_fops = {
+	.llseek			= no_llseek,
 	.release		= perf_release,
 	.read			= perf_read,
 	.poll			= perf_poll,
@@ -7093,6 +6755,14 @@ static const struct file_operations perf_fops = {
  * If there's data, ensure we set the poll() state and publish everything
  * to user-space before waking everybody up.
  */
+
+static inline struct fasync_struct **perf_event_fasync(struct perf_event *event)
+{
+	/* only the parent has fasync state */
+	if (event->parent)
+		event = event->parent;
+	return &event->fasync;
+}
 
 void perf_event_wakeup(struct perf_event *event)
 {
@@ -7128,7 +6798,7 @@ static void perf_sigtrap(struct perf_event *event)
 /*
  * Deliver the pending work in-event-context or follow the context.
  */
-static void __perf_pending_disable(struct perf_event *event)
+static void __perf_pending_irq(struct perf_event *event)
 {
 	int cpu = READ_ONCE(event->oncpu);
 
@@ -7143,6 +6813,11 @@ static void __perf_pending_disable(struct perf_event *event)
 	 * Yay, we hit home and are in the context of the event.
 	 */
 	if (cpu == smp_processor_id()) {
+		if (event->pending_sigtrap) {
+			event->pending_sigtrap = 0;
+			perf_sigtrap(event);
+			local_dec(&event->ctx->nr_pending);
+		}
 		if (event->pending_disable) {
 			event->pending_disable = 0;
 			perf_event_disable_local(event);
@@ -7166,26 +6841,11 @@ static void __perf_pending_disable(struct perf_event *event)
 	 *				  irq_work_queue(); // FAILS
 	 *
 	 *  irq_work_run()
-	 *    perf_pending_disable()
+	 *    perf_pending_irq()
 	 *
 	 * But the event runs on CPU-B and wants disabling there.
 	 */
-	irq_work_queue_on(&event->pending_disable_irq, cpu);
-}
-
-static void perf_pending_disable(struct irq_work *entry)
-{
-	struct perf_event *event = container_of(entry, struct perf_event, pending_disable_irq);
-	int rctx;
-
-	/*
-	 * If we 'fail' here, that's OK, it means recursion is already disabled
-	 * and we won't recurse 'further'.
-	 */
-	rctx = perf_swevent_get_recursion_context();
-	__perf_pending_disable(event);
-	if (rctx >= 0)
-		perf_swevent_put_recursion_context(rctx);
+	irq_work_queue_on(&event->pending_irq, cpu);
 }
 
 static void perf_pending_irq(struct irq_work *entry)
@@ -7208,6 +6868,8 @@ static void perf_pending_irq(struct irq_work *entry)
 		perf_event_wakeup(event);
 	}
 
+	__perf_pending_irq(event);
+
 	if (rctx >= 0)
 		perf_swevent_put_recursion_context(rctx);
 }
@@ -7226,7 +6888,7 @@ static void perf_pending_task(struct callback_head *head)
 	if (event->pending_work) {
 		event->pending_work = 0;
 		perf_sigtrap(event);
-		local_dec(&event->ctx->nr_no_switch_fast);
+		local_dec(&event->ctx->nr_pending);
 	}
 	put_event(event);
 
@@ -7271,29 +6933,6 @@ void perf_unregister_guest_info_callbacks(struct perf_guest_info_callbacks *cbs)
 }
 EXPORT_SYMBOL_GPL(perf_unregister_guest_info_callbacks);
 #endif
-
-static bool should_sample_guest(struct perf_event *event)
-{
-	return !event->attr.exclude_guest && perf_guest_state();
-}
-
-unsigned long perf_misc_flags(struct perf_event *event,
-			      struct pt_regs *regs)
-{
-	if (should_sample_guest(event))
-		return perf_arch_guest_misc_flags(regs);
-
-	return perf_arch_misc_flags(regs);
-}
-
-unsigned long perf_instruction_pointer(struct perf_event *event,
-				       struct pt_regs *regs)
-{
-	if (should_sample_guest(event))
-		return perf_guest_get_ip();
-
-	return perf_arch_instruction_pointer(regs);
-}
 
 static void
 perf_output_sample_regs(struct perf_output_handle *handle,
@@ -7358,6 +6997,10 @@ perf_sample_ustack_size(u16 stack_size, u16 header_size,
 
 	/* No regs, no stack pointer, no dump. */
 	if (!regs)
+		return 0;
+
+	/* No mm, no stack, no dump. */
+	if (!current->mm)
 		return 0;
 
 	/*
@@ -7630,7 +7273,7 @@ static void perf_output_read_one(struct perf_output_handle *handle,
 	u64 values[5];
 	int n = 0;
 
-	values[n++] = perf_event_count(event, has_inherit_and_sample_read(&event->attr));
+	values[n++] = perf_event_count(event);
 	if (read_format & PERF_FORMAT_TOTAL_TIME_ENABLED) {
 		values[n++] = enabled +
 			atomic64_read(&event->child_total_time_enabled);
@@ -7648,15 +7291,14 @@ static void perf_output_read_one(struct perf_output_handle *handle,
 }
 
 static void perf_output_read_group(struct perf_output_handle *handle,
-				   struct perf_event *event,
-				   u64 enabled, u64 running)
+			    struct perf_event *event,
+			    u64 enabled, u64 running)
 {
 	struct perf_event *leader = event->group_leader, *sub;
 	u64 read_format = event->attr.read_format;
 	unsigned long flags;
 	u64 values[6];
 	int n = 0;
-	bool self = has_inherit_and_sample_read(&event->attr);
 
 	/*
 	 * Disabling interrupts avoids all counter scheduling
@@ -7675,7 +7317,7 @@ static void perf_output_read_group(struct perf_output_handle *handle,
 	if ((leader != event) && !handle->skip_read)
 		perf_pmu_read(leader);
 
-	values[n++] = perf_event_count(leader, self);
+	values[n++] = perf_event_count(leader);
 	if (read_format & PERF_FORMAT_ID)
 		values[n++] = primary_event_id(leader);
 	if (read_format & PERF_FORMAT_LOST)
@@ -7689,7 +7331,7 @@ static void perf_output_read_group(struct perf_output_handle *handle,
 		if ((sub != event) && !handle->skip_read)
 			perf_pmu_read(sub);
 
-		values[n++] = perf_event_count(sub, self);
+		values[n++] = perf_event_count(sub);
 		if (read_format & PERF_FORMAT_ID)
 			values[n++] = primary_event_id(sub);
 		if (read_format & PERF_FORMAT_LOST)
@@ -7710,10 +7352,6 @@ static void perf_output_read_group(struct perf_output_handle *handle,
  * The problem is that its both hard and excessively expensive to iterate the
  * child list, not to mention that its impossible to IPI the children running
  * on another CPU, from interrupt/NMI context.
- *
- * Instead the combination of PERF_SAMPLE_READ and inherit will track per-thread
- * counts rather than attempting to accumulate some value across all children on
- * all cores.
  */
 static void perf_output_read(struct perf_output_handle *handle,
 			     struct perf_event *event)
@@ -7833,14 +7471,6 @@ void perf_output_sample(struct perf_output_handle *handle,
 			if (branch_sample_hw_index(event))
 				perf_output_put(handle, data->br_stack->hw_idx);
 			perf_output_copy(handle, data->br_stack->entries, size);
-			/*
-			 * Add the extension space which is appended
-			 * right after the struct perf_branch_stack.
-			 */
-			if (data->br_stack_cntr) {
-				size = data->br_stack->nr * sizeof(u64);
-				perf_output_copy(handle, data->br_stack_cntr, size);
-			}
 		} else {
 			/*
 			 * we always store at least the value of nr
@@ -7975,7 +7605,7 @@ static u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
 {
 	u64 size = 0;
 
-#ifdef CONFIG_HAVE_GUP_FAST
+#ifdef CONFIG_HAVE_FAST_GUP
 	pgd_t *pgdp, pgd;
 	p4d_t *p4dp, p4d;
 	pud_t *pudp, pud;
@@ -8021,9 +7651,9 @@ again:
 
 	pte = ptep_get_lockless(ptep);
 	if (pte_present(pte))
-		size = __pte_leaf_size(pmd, pte);
+		size = pte_leaf_size(pte);
 	pte_unmap(ptep);
-#endif /* CONFIG_HAVE_GUP_FAST */
+#endif /* CONFIG_HAVE_FAST_GUP */
 
 	return size;
 }
@@ -8071,6 +7701,9 @@ perf_callchain(struct perf_event *event, struct pt_regs *regs)
 	const u32 max_stack = event->attr.sample_max_stack;
 	struct perf_callchain_entry *callchain;
 
+	if (!current->mm)
+		user = false;
+
 	if (!kernel && !user)
 		return &__empty_callchain;
 
@@ -8113,7 +7746,7 @@ void perf_prepare_sample(struct perf_sample_data *data,
 	__perf_event_header__init_id(data, event, filtered_sample_type);
 
 	if (filtered_sample_type & PERF_SAMPLE_IP) {
-		data->ip = perf_instruction_pointer(event, regs);
+		data->ip = perf_instruction_pointer(regs);
 		data->sample_flags |= PERF_SAMPLE_IP;
 	}
 
@@ -8277,7 +7910,7 @@ void perf_prepare_header(struct perf_event_header *header,
 {
 	header->type = PERF_RECORD_SAMPLE;
 	header->size = perf_sample_data_size(data, event);
-	header->misc = perf_misc_flags(event, regs);
+	header->misc = perf_misc_flags(regs);
 
 	/*
 	 * If you're adding more sample types here, you likely need to do
@@ -8288,49 +7921,6 @@ void perf_prepare_header(struct perf_event_header *header,
 	 * do here next.
 	 */
 	WARN_ON_ONCE(header->size & 7);
-}
-
-static void __perf_event_aux_pause(struct perf_event *event, bool pause)
-{
-	if (pause) {
-		if (!event->hw.aux_paused) {
-			event->hw.aux_paused = 1;
-			event->pmu->stop(event, PERF_EF_PAUSE);
-		}
-	} else {
-		if (event->hw.aux_paused) {
-			event->hw.aux_paused = 0;
-			event->pmu->start(event, PERF_EF_RESUME);
-		}
-	}
-}
-
-static void perf_event_aux_pause(struct perf_event *event, bool pause)
-{
-	struct perf_buffer *rb;
-
-	if (WARN_ON_ONCE(!event))
-		return;
-
-	rb = ring_buffer_get(event);
-	if (!rb)
-		return;
-
-	scoped_guard (irqsave) {
-		/*
-		 * Guard against self-recursion here. Another event could trip
-		 * this same from NMI context.
-		 */
-		if (READ_ONCE(rb->aux_in_pause_resume))
-			break;
-
-		WRITE_ONCE(rb->aux_in_pause_resume, 1);
-		barrier();
-		__perf_event_aux_pause(event, pause);
-		barrier();
-		WRITE_ONCE(rb->aux_in_pause_resume, 0);
-	}
-	ring_buffer_put(rb);
 }
 
 static __always_inline int
@@ -8743,58 +8333,10 @@ static void perf_event_task(struct task_struct *task,
 		       task_ctx);
 }
 
-/*
- * Allocate data for a new task when profiling system-wide
- * events which require PMU specific data
- */
-static void
-perf_event_alloc_task_data(struct task_struct *child,
-			   struct task_struct *parent)
-{
-	struct kmem_cache *ctx_cache = NULL;
-	struct perf_ctx_data *cd;
-
-	if (!refcount_read(&global_ctx_data_ref))
-		return;
-
-	scoped_guard (rcu) {
-		cd = rcu_dereference(parent->perf_ctx_data);
-		if (cd)
-			ctx_cache = cd->ctx_cache;
-	}
-
-	if (!ctx_cache)
-		return;
-
-	guard(percpu_read)(&global_ctx_data_rwsem);
-	scoped_guard (rcu) {
-		cd = rcu_dereference(child->perf_ctx_data);
-		if (!cd) {
-			/*
-			 * A system-wide event may be unaccount,
-			 * when attaching the perf_ctx_data.
-			 */
-			if (!refcount_read(&global_ctx_data_ref))
-				return;
-			goto attach;
-		}
-
-		if (!cd->global) {
-			cd->global = 1;
-			refcount_inc(&cd->refcount);
-		}
-	}
-
-	return;
-attach:
-	attach_task_ctx_data(child, ctx_cache, true);
-}
-
 void perf_event_fork(struct task_struct *task)
 {
 	perf_event_task(task, NULL, 1);
 	perf_event_namespaces(task);
-	perf_event_alloc_task_data(task, current);
 }
 
 /*
@@ -8858,7 +8400,7 @@ static void perf_event_comm_event(struct perf_comm_event *comm_event)
 	unsigned int size;
 
 	memset(comm, 0, sizeof(comm));
-	strscpy(comm, comm_event->task->comm);
+	strscpy(comm, comm_event->task->comm, sizeof(comm));
 	size = ALIGN(strlen(comm)+1, sizeof(u64));
 
 	comm_event->comm = comm;
@@ -9302,7 +8844,7 @@ static void perf_event_mmap_event(struct perf_mmap_event *mmap_event)
 	}
 
 cpy_name:
-	strscpy(tmp, name);
+	strscpy(tmp, name, sizeof(tmp));
 	name = tmp;
 got_name:
 	/*
@@ -9329,7 +8871,7 @@ got_name:
 	mmap_event->event_id.header.size = sizeof(mmap_event->event_id) + size;
 
 	if (atomic_read(&nr_build_id_events))
-		build_id_parse_nofault(vma, mmap_event->build_id, &mmap_event->build_id_size);
+		build_id_parse(vma, mmap_event->build_id, &mmap_event->build_id_size);
 
 	perf_iterate_sb(perf_event_mmap_output,
 		       mmap_event,
@@ -9617,7 +9159,7 @@ static void perf_event_switch(struct task_struct *task,
 		},
 	};
 
-	if (!sched_in && task_is_runnable(task)) {
+	if (!sched_in && task->on_rq) {
 		switch_event.event_id.header.misc |=
 				PERF_RECORD_MISC_SWITCH_OUT_PREEMPT;
 	}
@@ -9726,7 +9268,7 @@ void perf_event_ksymbol(u16 ksym_type, u64 addr, u32 len, bool unregister,
 	    ksym_type == PERF_RECORD_KSYMBOL_TYPE_UNKNOWN)
 		goto err;
 
-	strscpy(name, sym);
+	strscpy(name, sym, KSYM_NAME_LEN);
 	name_len = strlen(name) + 1;
 	while (!IS_ALIGNED(name_len, sizeof(u64)))
 		name[name_len++] = '\0';
@@ -9828,6 +9370,10 @@ void perf_event_bpf_event(struct bpf_prog *prog,
 {
 	struct perf_bpf_event bpf_event;
 
+	if (type <= PERF_BPF_EVENT_UNKNOWN ||
+	    type >= PERF_BPF_EVENT_MAX)
+		return;
+
 	switch (type) {
 	case PERF_BPF_EVENT_PROG_LOAD:
 	case PERF_BPF_EVENT_PROG_UNLOAD:
@@ -9835,7 +9381,7 @@ void perf_event_bpf_event(struct bpf_prog *prog,
 			perf_event_bpf_emit_ksymbols(prog, type);
 		break;
 	default:
-		return;
+		break;
 	}
 
 	if (!atomic_read(&nr_bpf_events))
@@ -10029,14 +9575,14 @@ __perf_event_account_interrupt(struct perf_event *event, int throttle)
 		hwc->interrupts = 1;
 	} else {
 		hwc->interrupts++;
-		if (unlikely(throttle &&
-			     hwc->interrupts > max_samples_per_tick)) {
-			__this_cpu_inc(perf_throttled_count);
-			tick_dep_set_cpu(smp_processor_id(), TICK_DEP_BIT_PERF_EVENTS);
-			hwc->interrupts = MAX_INTERRUPTS;
-			perf_log_throttle(event, 0);
-			ret = 1;
-		}
+	}
+
+	if (unlikely(throttle && hwc->interrupts >= max_samples_per_tick)) {
+		__this_cpu_inc(perf_throttled_count);
+		tick_dep_set_cpu(smp_processor_id(), TICK_DEP_BIT_PERF_EVENTS);
+		hwc->interrupts = MAX_INTERRUPTS;
+		perf_log_throttle(event, 0);
+		ret = 1;
 	}
 
 	if (event->attr.freq) {
@@ -10070,100 +9616,6 @@ static inline bool sample_is_allowed(struct perf_event *event, struct pt_regs *r
 	return true;
 }
 
-#ifdef CONFIG_BPF_SYSCALL
-static int bpf_overflow_handler(struct perf_event *event,
-				struct perf_sample_data *data,
-				struct pt_regs *regs)
-{
-	struct bpf_perf_event_data_kern ctx = {
-		.data = data,
-		.event = event,
-	};
-	struct bpf_prog *prog;
-	int ret = 0;
-
-	ctx.regs = perf_arch_bpf_user_pt_regs(regs);
-	if (unlikely(__this_cpu_inc_return(bpf_prog_active) != 1))
-		goto out;
-	rcu_read_lock();
-	prog = READ_ONCE(event->prog);
-	if (prog) {
-		perf_prepare_sample(data, event, regs);
-		ret = bpf_prog_run(prog, &ctx);
-	}
-	rcu_read_unlock();
-out:
-	__this_cpu_dec(bpf_prog_active);
-
-	return ret;
-}
-
-static inline int perf_event_set_bpf_handler(struct perf_event *event,
-					     struct bpf_prog *prog,
-					     u64 bpf_cookie)
-{
-	if (event->overflow_handler_context)
-		/* hw breakpoint or kernel counter */
-		return -EINVAL;
-
-	if (event->prog)
-		return -EEXIST;
-
-	if (prog->type != BPF_PROG_TYPE_PERF_EVENT)
-		return -EINVAL;
-
-	if (event->attr.precise_ip &&
-	    prog->call_get_stack &&
-	    (!(event->attr.sample_type & PERF_SAMPLE_CALLCHAIN) ||
-	     event->attr.exclude_callchain_kernel ||
-	     event->attr.exclude_callchain_user)) {
-		/*
-		 * On perf_event with precise_ip, calling bpf_get_stack()
-		 * may trigger unwinder warnings and occasional crashes.
-		 * bpf_get_[stack|stackid] works around this issue by using
-		 * callchain attached to perf_sample_data. If the
-		 * perf_event does not full (kernel and user) callchain
-		 * attached to perf_sample_data, do not allow attaching BPF
-		 * program that calls bpf_get_[stack|stackid].
-		 */
-		return -EPROTO;
-	}
-
-	event->prog = prog;
-	event->bpf_cookie = bpf_cookie;
-	return 0;
-}
-
-static inline void perf_event_free_bpf_handler(struct perf_event *event)
-{
-	struct bpf_prog *prog = event->prog;
-
-	if (!prog)
-		return;
-
-	event->prog = NULL;
-	bpf_prog_put(prog);
-}
-#else
-static inline int bpf_overflow_handler(struct perf_event *event,
-				       struct perf_sample_data *data,
-				       struct pt_regs *regs)
-{
-	return 1;
-}
-
-static inline int perf_event_set_bpf_handler(struct perf_event *event,
-					     struct bpf_prog *prog,
-					     u64 bpf_cookie)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline void perf_event_free_bpf_handler(struct perf_event *event)
-{
-}
-#endif
-
 /*
  * Generic event overflow handling, sampling.
  */
@@ -10183,13 +9635,6 @@ static int __perf_event_overflow(struct perf_event *event,
 		return 0;
 
 	ret = __perf_event_account_interrupt(event, throttle);
-
-	if (event->attr.aux_pause)
-		perf_event_aux_pause(event->aux_event, true);
-
-	if (event->prog && event->prog->type == BPF_PROG_TYPE_PERF_EVENT &&
-	    !bpf_overflow_handler(event, data, regs))
-		goto out;
 
 	/*
 	 * XXX event_limit might not quite work as expected on inherited
@@ -10212,27 +9657,16 @@ static int __perf_event_overflow(struct perf_event *event,
 		 */
 		bool valid_sample = sample_is_allowed(event, regs);
 		unsigned int pending_id = 1;
-		enum task_work_notify_mode notify_mode;
 
 		if (regs)
 			pending_id = hash32_ptr((void *)instruction_pointer(regs)) ?: 1;
-
-		notify_mode = in_nmi() ? TWA_NMI_CURRENT : TWA_RESUME;
-
-		if (!event->pending_work &&
-		    !task_work_add(current, &event->pending_task, notify_mode)) {
-			event->pending_work = pending_id;
-			local_inc(&event->ctx->nr_no_switch_fast);
-			WARN_ON_ONCE(!atomic_long_inc_not_zero(&event->refcount));
-
-			event->pending_addr = 0;
-			if (valid_sample && (data->sample_flags & PERF_SAMPLE_ADDR))
-				event->pending_addr = data->addr;
-
+		if (!event->pending_sigtrap) {
+			event->pending_sigtrap = pending_id;
+			local_inc(&event->ctx->nr_pending);
 		} else if (event->attr.exclude_kernel && valid_sample) {
 			/*
 			 * Should not be able to return to user space without
-			 * consuming pending_work; with exceptions:
+			 * consuming pending_sigtrap; with exceptions:
 			 *
 			 *  1. Where !exclude_kernel, events can overflow again
 			 *     in the kernel without returning to user space.
@@ -10242,8 +9676,13 @@ static int __perf_event_overflow(struct perf_event *event,
 			 *     To approximate progress (with false negatives),
 			 *     check 32-bit hash of the current IP.
 			 */
-			WARN_ON_ONCE(event->pending_work != pending_id);
+			WARN_ON_ONCE(event->pending_sigtrap != pending_id);
 		}
+
+		event->pending_addr = 0;
+		if (valid_sample && (data->sample_flags & PERF_SAMPLE_ADDR))
+			event->pending_addr = data->addr;
+		irq_work_queue(&event->pending_irq);
 	}
 
 	READ_ONCE(event->overflow_handler)(event, data, regs);
@@ -10252,9 +9691,6 @@ static int __perf_event_overflow(struct perf_event *event,
 		event->pending_wakeup = 1;
 		irq_work_queue(&event->pending_irq);
 	}
-out:
-	if (event->attr.aux_resume)
-		perf_event_aux_pause(event->aux_event, false);
 
 	return ret;
 }
@@ -10274,7 +9710,11 @@ struct swevent_htable {
 	struct swevent_hlist		*swevent_hlist;
 	struct mutex			hlist_mutex;
 	int				hlist_refcount;
+
+	/* Recursion avoidance in each contexts */
+	int				recursion[PERF_NR_CONTEXTS];
 };
+
 static DEFINE_PER_CPU(struct swevent_htable, swevent_htable);
 
 /*
@@ -10362,7 +9802,8 @@ static void perf_swevent_event(struct perf_event *event, u64 nr,
 	perf_swevent_overflow(event, 0, data, regs);
 }
 
-int perf_exclude_event(struct perf_event *event, struct pt_regs *regs)
+static int perf_exclude_event(struct perf_event *event,
+			      struct pt_regs *regs)
 {
 	if (event->hw.state & PERF_HES_STOPPED)
 		return 1;
@@ -10471,13 +9912,17 @@ DEFINE_PER_CPU(struct pt_regs, __perf_regs[4]);
 
 int perf_swevent_get_recursion_context(void)
 {
-	return get_recursion_context(current->perf_recursion);
+	struct swevent_htable *swhash = this_cpu_ptr(&swevent_htable);
+
+	return get_recursion_context(swhash->recursion);
 }
 EXPORT_SYMBOL_GPL(perf_swevent_get_recursion_context);
 
 void perf_swevent_put_recursion_context(int rctx)
 {
-	put_recursion_context(current->perf_recursion, rctx);
+	struct swevent_htable *swhash = this_cpu_ptr(&swevent_htable);
+
+	put_recursion_context(swhash->recursion, rctx);
 }
 
 void ___perf_sw_event(u32 event_id, u64 nr, struct pt_regs *regs, u64 addr)
@@ -11013,7 +10458,7 @@ static int perf_uprobe_event_init(struct perf_event *event)
 	if (event->attr.type != perf_uprobe.type)
 		return -ENOENT;
 
-	if (!perfmon_capable())
+	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
 
 	/*
@@ -11050,6 +10495,97 @@ static void perf_event_free_filter(struct perf_event *event)
 	ftrace_profile_free_filter(event);
 }
 
+#ifdef CONFIG_BPF_SYSCALL
+static void bpf_overflow_handler(struct perf_event *event,
+				 struct perf_sample_data *data,
+				 struct pt_regs *regs)
+{
+	struct bpf_perf_event_data_kern ctx = {
+		.data = data,
+		.event = event,
+	};
+	struct bpf_prog *prog;
+	int ret = 0;
+
+	ctx.regs = perf_arch_bpf_user_pt_regs(regs);
+	if (unlikely(__this_cpu_inc_return(bpf_prog_active) != 1))
+		goto out;
+	rcu_read_lock();
+	prog = READ_ONCE(event->prog);
+	if (prog) {
+		perf_prepare_sample(data, event, regs);
+		ret = bpf_prog_run(prog, &ctx);
+	}
+	rcu_read_unlock();
+out:
+	__this_cpu_dec(bpf_prog_active);
+	if (!ret)
+		return;
+
+	event->orig_overflow_handler(event, data, regs);
+}
+
+static int perf_event_set_bpf_handler(struct perf_event *event,
+				      struct bpf_prog *prog,
+				      u64 bpf_cookie)
+{
+	if (event->overflow_handler_context)
+		/* hw breakpoint or kernel counter */
+		return -EINVAL;
+
+	if (event->prog)
+		return -EEXIST;
+
+	if (prog->type != BPF_PROG_TYPE_PERF_EVENT)
+		return -EINVAL;
+
+	if (event->attr.precise_ip &&
+	    prog->call_get_stack &&
+	    (!(event->attr.sample_type & PERF_SAMPLE_CALLCHAIN) ||
+	     event->attr.exclude_callchain_kernel ||
+	     event->attr.exclude_callchain_user)) {
+		/*
+		 * On perf_event with precise_ip, calling bpf_get_stack()
+		 * may trigger unwinder warnings and occasional crashes.
+		 * bpf_get_[stack|stackid] works around this issue by using
+		 * callchain attached to perf_sample_data. If the
+		 * perf_event does not full (kernel and user) callchain
+		 * attached to perf_sample_data, do not allow attaching BPF
+		 * program that calls bpf_get_[stack|stackid].
+		 */
+		return -EPROTO;
+	}
+
+	event->prog = prog;
+	event->bpf_cookie = bpf_cookie;
+	event->orig_overflow_handler = READ_ONCE(event->overflow_handler);
+	WRITE_ONCE(event->overflow_handler, bpf_overflow_handler);
+	return 0;
+}
+
+static void perf_event_free_bpf_handler(struct perf_event *event)
+{
+	struct bpf_prog *prog = event->prog;
+
+	if (!prog)
+		return;
+
+	WRITE_ONCE(event->overflow_handler, event->orig_overflow_handler);
+	event->prog = NULL;
+	bpf_prog_put(prog);
+}
+#else
+static int perf_event_set_bpf_handler(struct perf_event *event,
+				      struct bpf_prog *prog,
+				      u64 bpf_cookie)
+{
+	return -EOPNOTSUPP;
+}
+static void perf_event_free_bpf_handler(struct perf_event *event)
+{
+}
+#endif
+
 /*
  * returns true if the event is a tracepoint, or a kprobe/upprobe created
  * with perf_event_open()
@@ -11069,8 +10605,9 @@ static inline bool perf_event_is_tracing(struct perf_event *event)
 	return false;
 }
 
-int perf_event_set_bpf_prog(struct perf_event *event, struct bpf_prog *prog,
-			    u64 bpf_cookie)
+static int __perf_event_set_bpf_prog(struct perf_event *event,
+				     struct bpf_prog *prog,
+				     u64 bpf_cookie)
 {
 	bool is_kprobe, is_uprobe, is_tracepoint, is_syscall_tp;
 
@@ -11090,7 +10627,7 @@ int perf_event_set_bpf_prog(struct perf_event *event, struct bpf_prog *prog,
 	    (is_syscall_tp && prog->type != BPF_PROG_TYPE_TRACEPOINT))
 		return -EINVAL;
 
-	if (prog->type == BPF_PROG_TYPE_KPROBE && prog->sleepable && !is_uprobe)
+	if (prog->type == BPF_PROG_TYPE_KPROBE && prog->aux->sleepable && !is_uprobe)
 		/* only uprobe programs are allowed to be sleepable */
 		return -EINVAL;
 
@@ -11108,11 +10645,22 @@ int perf_event_set_bpf_prog(struct perf_event *event, struct bpf_prog *prog,
 	return perf_event_attach_bpf_prog(event, prog, bpf_cookie);
 }
 
+int perf_event_set_bpf_prog(struct perf_event *event,
+			    struct bpf_prog *prog,
+			    u64 bpf_cookie)
+{
+	struct perf_event_context *ctx;
+	int ret;
+
+	ctx = perf_event_ctx_lock(event);
+	ret = __perf_event_set_bpf_prog(event, prog, bpf_cookie);
+	perf_event_ctx_unlock(event, ctx);
+
+	return ret;
+}
+
 void perf_event_free_bpf_prog(struct perf_event *event)
 {
-	if (!event->prog)
-		return;
-
 	if (!perf_event_is_tracing(event)) {
 		perf_event_free_bpf_handler(event);
 		return;
@@ -11130,7 +10678,15 @@ static void perf_event_free_filter(struct perf_event *event)
 {
 }
 
-int perf_event_set_bpf_prog(struct perf_event *event, struct bpf_prog *prog,
+static int __perf_event_set_bpf_prog(struct perf_event *event,
+				     struct bpf_prog *prog,
+				     u64 bpf_cookie)
+{
+	return -ENOENT;
+}
+
+int perf_event_set_bpf_prog(struct perf_event *event,
+			    struct bpf_prog *prog,
 			    u64 bpf_cookie)
 {
 	return -ENOENT;
@@ -11209,17 +10765,6 @@ static void perf_addr_filters_splice(struct perf_event *event,
 	raw_spin_unlock_irqrestore(&event->addr_filters.lock, flags);
 
 	free_filters_list(&list);
-}
-
-static void perf_free_addr_filters(struct perf_event *event)
-{
-	/*
-	 * Used during free paths, there is no concurrency.
-	 */
-	if (list_empty(&event->addr_filters.list))
-		return;
-
-	perf_addr_filters_splice(event, NULL);
 }
 
 /*
@@ -11660,7 +11205,8 @@ static void perf_swevent_init_hrtimer(struct perf_event *event)
 	if (!is_sampling_event(event))
 		return;
 
-	hrtimer_setup(&hwc->hrtimer, perf_swevent_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
+	hrtimer_init(&hwc->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
+	hwc->hrtimer.function = perf_swevent_hrtimer;
 
 	/*
 	 * Since hrtimers have a fixed rate, we can do a static freq->period
@@ -11897,6 +11443,11 @@ static int perf_event_idx_default(struct perf_event *event)
 	return 0;
 }
 
+static void free_pmu_context(struct pmu *pmu)
+{
+	free_percpu(pmu->cpu_pmu_context);
+}
+
 /*
  * Let userspace know that this PMU supports address range filtering:
  */
@@ -11906,7 +11457,7 @@ static ssize_t nr_addr_filters_show(struct device *dev,
 {
 	struct pmu *pmu = dev_get_drvdata(dev);
 
-	return sysfs_emit(page, "%d\n", pmu->nr_addr_filters);
+	return scnprintf(page, PAGE_SIZE - 1, "%d\n", pmu->nr_addr_filters);
 }
 DEVICE_ATTR_RO(nr_addr_filters);
 
@@ -11917,7 +11468,7 @@ type_show(struct device *dev, struct device_attribute *attr, char *page)
 {
 	struct pmu *pmu = dev_get_drvdata(dev);
 
-	return sysfs_emit(page, "%d\n", pmu->type);
+	return scnprintf(page, PAGE_SIZE - 1, "%d\n", pmu->type);
 }
 static DEVICE_ATTR_RO(type);
 
@@ -11928,7 +11479,7 @@ perf_event_mux_interval_ms_show(struct device *dev,
 {
 	struct pmu *pmu = dev_get_drvdata(dev);
 
-	return sysfs_emit(page, "%d\n", pmu->hrtimer_interval_ms);
+	return scnprintf(page, PAGE_SIZE - 1, "%d\n", pmu->hrtimer_interval_ms);
 }
 
 static DEFINE_MUTEX(mux_interval_mutex);
@@ -11959,7 +11510,7 @@ perf_event_mux_interval_ms_store(struct device *dev,
 	cpus_read_lock();
 	for_each_online_cpu(cpu) {
 		struct perf_cpu_pmu_context *cpc;
-		cpc = *per_cpu_ptr(pmu->cpu_pmu_context, cpu);
+		cpc = per_cpu_ptr(pmu->cpu_pmu_context, cpu);
 		cpc->hrtimer_interval = ns_to_ktime(NSEC_PER_MSEC * timer);
 
 		cpu_function_call(cpu, perf_mux_hrtimer_restart_ipi, cpc);
@@ -11971,60 +11522,10 @@ perf_event_mux_interval_ms_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(perf_event_mux_interval_ms);
 
-static inline const struct cpumask *perf_scope_cpu_topology_cpumask(unsigned int scope, int cpu)
-{
-	switch (scope) {
-	case PERF_PMU_SCOPE_CORE:
-		return topology_sibling_cpumask(cpu);
-	case PERF_PMU_SCOPE_DIE:
-		return topology_die_cpumask(cpu);
-	case PERF_PMU_SCOPE_CLUSTER:
-		return topology_cluster_cpumask(cpu);
-	case PERF_PMU_SCOPE_PKG:
-		return topology_core_cpumask(cpu);
-	case PERF_PMU_SCOPE_SYS_WIDE:
-		return cpu_online_mask;
-	}
-
-	return NULL;
-}
-
-static inline struct cpumask *perf_scope_cpumask(unsigned int scope)
-{
-	switch (scope) {
-	case PERF_PMU_SCOPE_CORE:
-		return perf_online_core_mask;
-	case PERF_PMU_SCOPE_DIE:
-		return perf_online_die_mask;
-	case PERF_PMU_SCOPE_CLUSTER:
-		return perf_online_cluster_mask;
-	case PERF_PMU_SCOPE_PKG:
-		return perf_online_pkg_mask;
-	case PERF_PMU_SCOPE_SYS_WIDE:
-		return perf_online_sys_mask;
-	}
-
-	return NULL;
-}
-
-static ssize_t cpumask_show(struct device *dev, struct device_attribute *attr,
-			    char *buf)
-{
-	struct pmu *pmu = dev_get_drvdata(dev);
-	struct cpumask *mask = perf_scope_cpumask(pmu->scope);
-
-	if (mask)
-		return cpumap_print_to_pagebuf(true, buf, mask);
-	return 0;
-}
-
-static DEVICE_ATTR_RO(cpumask);
-
 static struct attribute *pmu_dev_attrs[] = {
 	&dev_attr_type.attr,
 	&dev_attr_perf_event_mux_interval_ms.attr,
 	&dev_attr_nr_addr_filters.attr,
-	&dev_attr_cpumask.attr,
 	NULL,
 };
 
@@ -12034,10 +11535,6 @@ static umode_t pmu_dev_is_visible(struct kobject *kobj, struct attribute *a, int
 	struct pmu *pmu = dev_get_drvdata(dev);
 
 	if (n == 2 && !pmu->nr_addr_filters)
-		return 0;
-
-	/* cpumask */
-	if (n == 3 && pmu->scope == PERF_PMU_SCOPE_NONE)
 		return 0;
 
 	return a->mode;
@@ -12102,7 +11599,6 @@ del_dev:
 
 free_dev:
 	put_device(pmu->dev);
-	pmu->dev = NULL;
 	goto out;
 }
 
@@ -12124,85 +11620,52 @@ static bool idr_cmpxchg(struct idr *idr, unsigned long id, void *old, void *new)
 	return true;
 }
 
-static void perf_pmu_free(struct pmu *pmu)
+int perf_pmu_register(struct pmu *pmu, const char *name, int type)
 {
-	if (pmu_bus_running && pmu->dev && pmu->dev != PMU_NULL_DEV) {
-		if (pmu->nr_addr_filters)
-			device_remove_file(pmu->dev, &dev_attr_nr_addr_filters);
-		device_del(pmu->dev);
-		put_device(pmu->dev);
+	int cpu, ret, max = PERF_TYPE_MAX;
+
+	mutex_lock(&pmus_lock);
+	ret = -ENOMEM;
+	pmu->pmu_disable_count = alloc_percpu(int);
+	if (!pmu->pmu_disable_count)
+		goto unlock;
+
+	pmu->type = -1;
+	if (WARN_ONCE(!name, "Can not register anonymous pmu.\n")) {
+		ret = -EINVAL;
+		goto free_pdc;
 	}
-
-	if (pmu->cpu_pmu_context) {
-		int cpu;
-
-		for_each_possible_cpu(cpu) {
-			struct perf_cpu_pmu_context *cpc;
-
-			cpc = *per_cpu_ptr(pmu->cpu_pmu_context, cpu);
-			if (!cpc)
-				continue;
-			if (cpc->epc.embedded) {
-				/* refcount managed */
-				put_pmu_ctx(&cpc->epc);
-				continue;
-			}
-			kfree(cpc);
-		}
-		free_percpu(pmu->cpu_pmu_context);
-	}
-}
-
-DEFINE_FREE(pmu_unregister, struct pmu *, if (_T) perf_pmu_free(_T))
-
-int perf_pmu_register(struct pmu *_pmu, const char *name, int type)
-{
-	int cpu, max = PERF_TYPE_MAX;
-
-	struct pmu *pmu __free(pmu_unregister) = _pmu;
-	guard(mutex)(&pmus_lock);
-
-	if (WARN_ONCE(!name, "Can not register anonymous pmu.\n"))
-		return -EINVAL;
-
-	if (WARN_ONCE(pmu->scope >= PERF_PMU_MAX_SCOPE,
-		      "Can not register a pmu with an invalid scope.\n"))
-		return -EINVAL;
 
 	pmu->name = name;
 
 	if (type >= 0)
 		max = type;
 
-	CLASS(idr_alloc, pmu_type)(&pmu_idr, NULL, max, 0, GFP_KERNEL);
-	if (pmu_type.id < 0)
-		return pmu_type.id;
+	ret = idr_alloc(&pmu_idr, NULL, max, 0, GFP_KERNEL);
+	if (ret < 0)
+		goto free_pdc;
 
-	WARN_ON(type >= 0 && pmu_type.id != type);
+	WARN_ON(type >= 0 && ret != type);
 
-	pmu->type = pmu_type.id;
+	type = ret;
+	pmu->type = type;
 	atomic_set(&pmu->exclusive_cnt, 0);
 
 	if (pmu_bus_running && !pmu->dev) {
-		int ret = pmu_dev_alloc(pmu);
+		ret = pmu_dev_alloc(pmu);
 		if (ret)
-			return ret;
+			goto free_idr;
 	}
 
-	pmu->cpu_pmu_context = alloc_percpu(struct perf_cpu_pmu_context *);
+	ret = -ENOMEM;
+	pmu->cpu_pmu_context = alloc_percpu(struct perf_cpu_pmu_context);
 	if (!pmu->cpu_pmu_context)
-		return -ENOMEM;
+		goto free_dev;
 
 	for_each_possible_cpu(cpu) {
-		struct perf_cpu_pmu_context *cpc =
-			kmalloc_node(sizeof(struct perf_cpu_pmu_context),
-				     GFP_KERNEL | __GFP_ZERO,
-				     cpu_to_node(cpu));
+		struct perf_cpu_pmu_context *cpc;
 
-		if (!cpc)
-			return -ENOMEM;
-
-		*per_cpu_ptr(pmu->cpu_pmu_context, cpu) = cpc;
+		cpc = per_cpu_ptr(pmu->cpu_pmu_context, cpu);
 		__perf_init_event_pmu_context(&cpc->epc, pmu);
 		__perf_mux_hrtimer_init(cpc, cpu);
 	}
@@ -12239,21 +11702,39 @@ int perf_pmu_register(struct pmu *_pmu, const char *name, int type)
 	 * Now that the PMU is complete, make it visible to perf_try_init_event().
 	 */
 	if (!idr_cmpxchg(&pmu_idr, pmu->type, NULL, pmu))
-		return -EINVAL;
+		goto free_context;
 	list_add_rcu(&pmu->entry, &pmus);
 
-	take_idr_id(pmu_type);
-	_pmu = no_free_ptr(pmu); // let it rip
-	return 0;
+	ret = 0;
+unlock:
+	mutex_unlock(&pmus_lock);
+
+	return ret;
+
+free_context:
+	free_percpu(pmu->cpu_pmu_context);
+
+free_dev:
+	if (pmu->dev && pmu->dev != PMU_NULL_DEV) {
+		device_del(pmu->dev);
+		put_device(pmu->dev);
+	}
+
+free_idr:
+	idr_remove(&pmu_idr, pmu->type);
+
+free_pdc:
+	free_percpu(pmu->pmu_disable_count);
+	goto unlock;
 }
 EXPORT_SYMBOL_GPL(perf_pmu_register);
 
 void perf_pmu_unregister(struct pmu *pmu)
 {
-	scoped_guard (mutex, &pmus_lock) {
-		list_del_rcu(&pmu->entry);
-		idr_remove(&pmu_idr, pmu->type);
-	}
+	mutex_lock(&pmus_lock);
+	list_del_rcu(&pmu->entry);
+	idr_remove(&pmu_idr, pmu->type);
+	mutex_unlock(&pmus_lock);
 
 	/*
 	 * We dereference the pmu list under both SRCU and regular RCU, so
@@ -12262,7 +11743,14 @@ void perf_pmu_unregister(struct pmu *pmu)
 	synchronize_srcu(&pmus_srcu);
 	synchronize_rcu();
 
-	perf_pmu_free(pmu);
+	free_percpu(pmu->pmu_disable_count);
+	if (pmu_bus_running && pmu->dev && pmu->dev != PMU_NULL_DEV) {
+		if (pmu->nr_addr_filters)
+			device_remove_file(pmu->dev, &dev_attr_nr_addr_filters);
+		device_del(pmu->dev);
+		put_device(pmu->dev);
+	}
+	free_pmu_context(pmu);
 }
 EXPORT_SYMBOL_GPL(perf_pmu_unregister);
 
@@ -12302,61 +11790,32 @@ static int perf_try_init_event(struct pmu *pmu, struct perf_event *event)
 	if (ctx)
 		perf_event_ctx_unlock(event->group_leader, ctx);
 
+	if (!ret) {
+		if (!(pmu->capabilities & PERF_PMU_CAP_EXTENDED_REGS) &&
+		    has_extended_regs(event))
+			ret = -EOPNOTSUPP;
+
+		if (pmu->capabilities & PERF_PMU_CAP_NO_EXCLUDE &&
+		    event_has_any_exclude_flag(event))
+			ret = -EINVAL;
+
+		if (ret && event->destroy)
+			event->destroy(event);
+	}
+
 	if (ret)
-		goto err_pmu;
+		module_put(pmu->module);
 
-	if (!(pmu->capabilities & PERF_PMU_CAP_EXTENDED_REGS) &&
-	    has_extended_regs(event)) {
-		ret = -EOPNOTSUPP;
-		goto err_destroy;
-	}
-
-	if (pmu->capabilities & PERF_PMU_CAP_NO_EXCLUDE &&
-	    event_has_any_exclude_flag(event)) {
-		ret = -EINVAL;
-		goto err_destroy;
-	}
-
-	if (pmu->scope != PERF_PMU_SCOPE_NONE && event->cpu >= 0) {
-		const struct cpumask *cpumask;
-		struct cpumask *pmu_cpumask;
-		int cpu;
-
-		cpumask = perf_scope_cpu_topology_cpumask(pmu->scope, event->cpu);
-		pmu_cpumask = perf_scope_cpumask(pmu->scope);
-
-		ret = -ENODEV;
-		if (!pmu_cpumask || !cpumask)
-			goto err_destroy;
-
-		cpu = cpumask_any_and(pmu_cpumask, cpumask);
-		if (cpu >= nr_cpu_ids)
-			goto err_destroy;
-
-		event->event_caps |= PERF_EV_CAP_READ_SCOPE;
-	}
-
-	return 0;
-
-err_destroy:
-	if (event->destroy) {
-		event->destroy(event);
-		event->destroy = NULL;
-	}
-
-err_pmu:
-	event->pmu = NULL;
-	module_put(pmu->module);
 	return ret;
 }
 
 static struct pmu *perf_init_event(struct perf_event *event)
 {
 	bool extended_type = false;
+	int idx, type, ret;
 	struct pmu *pmu;
-	int type, ret;
 
-	guard(srcu)(&pmus_srcu);
+	idx = srcu_read_lock(&pmus_srcu);
 
 	/*
 	 * Save original type before calling pmu->event_init() since certain
@@ -12369,7 +11828,7 @@ static struct pmu *perf_init_event(struct perf_event *event)
 		pmu = event->parent->pmu;
 		ret = perf_try_init_event(pmu, event);
 		if (!ret)
-			return pmu;
+			goto unlock;
 	}
 
 	/*
@@ -12388,12 +11847,13 @@ static struct pmu *perf_init_event(struct perf_event *event)
 	}
 
 again:
-	scoped_guard (rcu)
-		pmu = idr_find(&pmu_idr, type);
+	rcu_read_lock();
+	pmu = idr_find(&pmu_idr, type);
+	rcu_read_unlock();
 	if (pmu) {
 		if (event->attr.type != type && type != PERF_TYPE_RAW &&
 		    !(pmu->capabilities & PERF_PMU_CAP_EXTENDED_HW_TYPE))
-			return ERR_PTR(-ENOENT);
+			goto fail;
 
 		ret = perf_try_init_event(pmu, event);
 		if (ret == -ENOENT && event->attr.type != type && !extended_type) {
@@ -12402,21 +11862,27 @@ again:
 		}
 
 		if (ret)
-			return ERR_PTR(ret);
+			pmu = ERR_PTR(ret);
 
-		return pmu;
+		goto unlock;
 	}
 
 	list_for_each_entry_rcu(pmu, &pmus, entry, lockdep_is_held(&pmus_srcu)) {
 		ret = perf_try_init_event(pmu, event);
 		if (!ret)
-			return pmu;
+			goto unlock;
 
-		if (ret != -ENOENT)
-			return ERR_PTR(ret);
+		if (ret != -ENOENT) {
+			pmu = ERR_PTR(ret);
+			goto unlock;
+		}
 	}
+fail:
+	pmu = ERR_PTR(-ENOENT);
+unlock:
+	srcu_read_unlock(&pmus_srcu, idx);
 
-	return ERR_PTR(-ENOENT);
+	return pmu;
 }
 
 static void attach_sb_event(struct perf_event *event)
@@ -12543,6 +12009,7 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		 void *context, int cgroup_fd)
 {
 	struct pmu *pmu;
+	struct perf_event *event;
 	struct hw_perf_event *hwc;
 	long err = -EINVAL;
 	int node;
@@ -12557,8 +12024,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 	}
 
 	node = (cpu >= 0) ? cpu_to_node(cpu) : -1;
-	struct perf_event *event __free(__free_event) =
-		kmem_cache_alloc_node(perf_event_cache, GFP_KERNEL | __GFP_ZERO, node);
+	event = kmem_cache_alloc_node(perf_event_cache, GFP_KERNEL | __GFP_ZERO,
+				      node);
 	if (!event)
 		return ERR_PTR(-ENOMEM);
 
@@ -12584,7 +12051,6 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 
 	init_waitqueue_head(&event->waitq);
 	init_irq_work(&event->pending_irq, perf_pending_irq);
-	event->pending_disable_irq = IRQ_WORK_INIT_HARD(perf_pending_disable);
 	init_task_work(&event->pending_task, perf_pending_task);
 
 	mutex_init(&event->mmap_mutex);
@@ -12625,11 +12091,13 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		overflow_handler = parent_event->overflow_handler;
 		context = parent_event->overflow_handler_context;
 #if defined(CONFIG_BPF_SYSCALL) && defined(CONFIG_EVENT_TRACING)
-		if (parent_event->prog) {
+		if (overflow_handler == bpf_overflow_handler) {
 			struct bpf_prog *prog = parent_event->prog;
 
 			bpf_prog_inc(prog);
 			event->prog = prog;
+			event->orig_overflow_handler =
+				parent_event->orig_overflow_handler;
 		}
 #endif
 	}
@@ -12658,31 +12126,19 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 	local64_set(&hwc->period_left, hwc->sample_period);
 
 	/*
-	 * We do not support PERF_SAMPLE_READ on inherited events unless
-	 * PERF_SAMPLE_TID is also selected, which allows inherited events to
-	 * collect per-thread samples.
+	 * We currently do not support PERF_SAMPLE_READ on inherited events.
 	 * See perf_output_read().
 	 */
-	if (has_inherit_and_sample_read(attr) && !(attr->sample_type & PERF_SAMPLE_TID))
-		return ERR_PTR(-EINVAL);
+	if (attr->inherit && (attr->sample_type & PERF_SAMPLE_READ))
+		goto err_ns;
 
 	if (!has_branch_stack(event))
 		event->attr.branch_sample_type = 0;
 
 	pmu = perf_init_event(event);
-	if (IS_ERR(pmu))
-		return (void*)pmu;
-
-	/*
-	 * The PERF_ATTACH_TASK_DATA is set in the event_init()->hw_config().
-	 * The attach should be right after the perf_init_event().
-	 * Otherwise, the __free_event() would mistakenly detach the non-exist
-	 * perf_ctx_data because of the other errors between them.
-	 */
-	if (event->attach_state & PERF_ATTACH_TASK_DATA) {
-		err = attach_perf_ctx_data(event);
-		if (err)
-			return ERR_PTR(err);
+	if (IS_ERR(pmu)) {
+		err = PTR_ERR(pmu);
+		goto err_ns;
 	}
 
 	/*
@@ -12690,39 +12146,35 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 	 * events (they don't make sense as the cgroup will be different
 	 * on other CPUs in the uncore mask).
 	 */
-	if (pmu->task_ctx_nr == perf_invalid_context && (task || cgroup_fd != -1))
-		return ERR_PTR(-EINVAL);
+	if (pmu->task_ctx_nr == perf_invalid_context && (task || cgroup_fd != -1)) {
+		err = -EINVAL;
+		goto err_pmu;
+	}
 
 	if (event->attr.aux_output &&
-	    (!(pmu->capabilities & PERF_PMU_CAP_AUX_OUTPUT) ||
-	     event->attr.aux_pause || event->attr.aux_resume))
-		return ERR_PTR(-EOPNOTSUPP);
-
-	if (event->attr.aux_pause && event->attr.aux_resume)
-		return ERR_PTR(-EINVAL);
-
-	if (event->attr.aux_start_paused) {
-		if (!(pmu->capabilities & PERF_PMU_CAP_AUX_PAUSE))
-			return ERR_PTR(-EOPNOTSUPP);
-		event->hw.aux_paused = 1;
+	    !(pmu->capabilities & PERF_PMU_CAP_AUX_OUTPUT)) {
+		err = -EOPNOTSUPP;
+		goto err_pmu;
 	}
 
 	if (cgroup_fd != -1) {
 		err = perf_cgroup_connect(cgroup_fd, event, attr, group_leader);
 		if (err)
-			return ERR_PTR(err);
+			goto err_pmu;
 	}
 
 	err = exclusive_event_init(event);
 	if (err)
-		return ERR_PTR(err);
+		goto err_pmu;
 
 	if (has_addr_filter(event)) {
 		event->addr_filter_ranges = kcalloc(pmu->nr_addr_filters,
 						    sizeof(struct perf_addr_filter_range),
 						    GFP_KERNEL);
-		if (!event->addr_filter_ranges)
-			return ERR_PTR(-ENOMEM);
+		if (!event->addr_filter_ranges) {
+			err = -ENOMEM;
+			goto err_per_task;
+		}
 
 		/*
 		 * Clone the parent's vma offsets: they are valid until exec()
@@ -12746,19 +12198,42 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		if (event->attr.sample_type & PERF_SAMPLE_CALLCHAIN) {
 			err = get_callchain_buffers(attr->sample_max_stack);
 			if (err)
-				return ERR_PTR(err);
-			event->attach_state |= PERF_ATTACH_CALLCHAIN;
+				goto err_addr_filters;
 		}
 	}
 
 	err = security_perf_event_alloc(event);
 	if (err)
-		return ERR_PTR(err);
+		goto err_callchain_buffer;
 
 	/* symmetric to unaccount_event() in _free_event() */
 	account_event(event);
 
-	return_ptr(event);
+	return event;
+
+err_callchain_buffer:
+	if (!event->parent) {
+		if (event->attr.sample_type & PERF_SAMPLE_CALLCHAIN)
+			put_callchain_buffers();
+	}
+err_addr_filters:
+	kfree(event->addr_filter_ranges);
+
+err_per_task:
+	exclusive_event_destroy(event);
+
+err_pmu:
+	if (is_cgroup_event(event))
+		perf_detach_cgroup(event);
+	if (event->destroy)
+		event->destroy(event);
+	module_put(pmu->module);
+err_ns:
+	if (event->hw.target)
+		put_task_struct(event->hw.target);
+	call_rcu(&event->rcu_head, free_event_rcu);
+
+	return ERR_PTR(err);
 }
 
 static int perf_copy_attr(struct perf_event_attr __user *uattr,
@@ -12828,7 +12303,7 @@ static int perf_copy_attr(struct perf_event_attr __user *uattr,
 		}
 		/* privileged levels capture (kernel, hv): check permissions */
 		if (mask & PERF_SAMPLE_BRANCH_PERM_PLM) {
-			ret = perf_allow_kernel();
+			ret = perf_allow_kernel(attr);
 			if (ret)
 				return ret;
 		}
@@ -13068,6 +12543,7 @@ SYSCALL_DEFINE5(perf_event_open,
 	struct perf_event_attr attr;
 	struct perf_event_context *ctx;
 	struct file *event_file = NULL;
+	struct fd group = {NULL, 0};
 	struct task_struct *task = NULL;
 	struct pmu *pmu;
 	int event_fd;
@@ -13085,12 +12561,12 @@ SYSCALL_DEFINE5(perf_event_open,
 		return err;
 
 	/* Do we allow access to perf_event_open(2) ? */
-	err = security_perf_event_open(PERF_SECURITY_OPEN);
+	err = security_perf_event_open(&attr, PERF_SECURITY_OPEN);
 	if (err)
 		return err;
 
 	if (!attr.exclude_kernel) {
-		err = perf_allow_kernel();
+		err = perf_allow_kernel(&attr);
 		if (err)
 			return err;
 	}
@@ -13110,7 +12586,7 @@ SYSCALL_DEFINE5(perf_event_open,
 
 	/* Only privileged users can get physical addresses */
 	if ((attr.sample_type & PERF_SAMPLE_PHYS_ADDR)) {
-		err = perf_allow_kernel();
+		err = perf_allow_kernel(&attr);
 		if (err)
 			return err;
 	}
@@ -13138,13 +12614,11 @@ SYSCALL_DEFINE5(perf_event_open,
 	if (event_fd < 0)
 		return event_fd;
 
-	CLASS(fd, group)(group_fd);     // group_fd == -1 => empty
 	if (group_fd != -1) {
-		if (!is_perf_file(group)) {
-			err = -EBADF;
+		err = perf_fget_light(group_fd, &group);
+		if (err)
 			goto err_fd;
-		}
-		group_leader = fd_file(group)->private_data;
+		group_leader = group.file->private_data;
 		if (flags & PERF_FLAG_FD_OUTPUT)
 			output_event = group_leader;
 		if (flags & PERF_FLAG_FD_NO_GROUP)
@@ -13155,7 +12629,7 @@ SYSCALL_DEFINE5(perf_event_open,
 		task = find_lively_task_by_vpid(pid);
 		if (IS_ERR(task)) {
 			err = PTR_ERR(task);
-			goto err_fd;
+			goto err_group_fd;
 		}
 	}
 
@@ -13422,11 +12896,12 @@ SYSCALL_DEFINE5(perf_event_open,
 	mutex_unlock(&current->perf_event_mutex);
 
 	/*
-	 * File reference in group guarantees that group_leader has been
-	 * kept alive until we place the new event on the sibling_list.
-	 * This ensures destruction of the group leader will find
-	 * the pointer to itself in perf_group_detach().
+	 * Drop the reference on the group_event after placing the
+	 * new event on the sibling_list. This ensures destruction
+	 * of the group leader will find the pointer to itself in
+	 * perf_group_detach().
 	 */
+	fdput(group);
 	fd_install(event_fd, event_file);
 	return event_fd;
 
@@ -13445,6 +12920,8 @@ err_alloc:
 err_task:
 	if (task)
 		put_task_struct(task);
+err_group_fd:
+	fdput(group);
 err_fd:
 	put_unused_fd(event_fd);
 	return err;
@@ -13475,7 +12952,7 @@ perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
 	 * Grouping is not supported for kernel events, neither is 'AUX',
 	 * make sure the caller's intentions are adjusted.
 	 */
-	if (attr->aux_output || attr->aux_action)
+	if (attr->aux_output)
 		return ERR_PTR(-EINVAL);
 
 	event = perf_event_alloc(attr, cpu, task, NULL, NULL,
@@ -13676,7 +13153,7 @@ static void sync_child_event(struct perf_event *child_event)
 			perf_event_read_event(child_event, task);
 	}
 
-	child_val = perf_event_count(child_event, false);
+	child_val = perf_event_count(child_event);
 
 	/*
 	 * Add back the child's count to the parent's count:
@@ -13761,7 +13238,7 @@ static void perf_event_exit_task_context(struct task_struct *child)
 	 * in.
 	 */
 	raw_spin_lock_irq(&child_ctx->lock);
-	task_ctx_sched_out(child_ctx, NULL, EVENT_ALL);
+	task_ctx_sched_out(child_ctx, EVENT_ALL);
 
 	/*
 	 * Now that the context is inactive, destroy the task <-> ctx relation
@@ -13826,12 +13303,6 @@ void perf_event_exit_task(struct task_struct *child)
 	 * At this point we need to send EXIT events to cpu contexts.
 	 */
 	perf_event_task(child, NULL, 0);
-
-	/*
-	 * Detach the perf_ctx_data for the system-wide event.
-	 */
-	guard(percpu_read)(&global_ctx_data_rwsem);
-	detach_task_ctx_data(child);
 }
 
 static void perf_free_event(struct perf_event *event,
@@ -13845,6 +13316,8 @@ static void perf_free_event(struct perf_event *event,
 	mutex_lock(&parent->child_mutex);
 	list_del_init(&event->child_list);
 	mutex_unlock(&parent->child_mutex);
+
+	put_event(parent);
 
 	raw_spin_lock_irq(&ctx->lock);
 	perf_group_detach(event);
@@ -13941,12 +13414,12 @@ const struct perf_event_attr *perf_event_attrs(struct perf_event *event)
 	return &event->attr;
 }
 
-int perf_allow_kernel(void)
+int perf_allow_kernel(struct perf_event_attr *attr)
 {
 	if (sysctl_perf_event_paranoid > 1 && !perfmon_capable())
 		return -EACCES;
 
-	return security_perf_event_open(PERF_SECURITY_KERNEL);
+	return security_perf_event_open(attr, PERF_SECURITY_KERNEL);
 }
 EXPORT_SYMBOL_GPL(perf_allow_kernel);
 
@@ -14008,6 +13481,7 @@ inherit_event(struct perf_event *parent_event,
 	if (is_orphaned_event(parent_event) ||
 	    !atomic_long_inc_not_zero(&parent_event->refcount)) {
 		mutex_unlock(&parent_event->child_mutex);
+		/* task_ctx_data is freed with child_ctx */
 		free_event(child_event);
 		return NULL;
 	}
@@ -14258,11 +13732,9 @@ int perf_event_init_task(struct task_struct *child, u64 clone_flags)
 {
 	int ret;
 
-	memset(child->perf_recursion, 0, sizeof(child->perf_recursion));
 	child->perf_event_ctxp = NULL;
 	mutex_init(&child->perf_event_mutex);
 	INIT_LIST_HEAD(&child->perf_event_list);
-	child->perf_ctx_data = NULL;
 
 	ret = perf_event_init_context(child, clone_flags);
 	if (ret) {
@@ -14280,12 +13752,6 @@ static void __init perf_event_init_all_cpus(void)
 	int cpu;
 
 	zalloc_cpumask_var(&perf_online_mask, GFP_KERNEL);
-	zalloc_cpumask_var(&perf_online_core_mask, GFP_KERNEL);
-	zalloc_cpumask_var(&perf_online_die_mask, GFP_KERNEL);
-	zalloc_cpumask_var(&perf_online_cluster_mask, GFP_KERNEL);
-	zalloc_cpumask_var(&perf_online_pkg_mask, GFP_KERNEL);
-	zalloc_cpumask_var(&perf_online_sys_mask, GFP_KERNEL);
-
 
 	for_each_possible_cpu(cpu) {
 		swhash = &per_cpu(swevent_htable, cpu);
@@ -14329,44 +13795,10 @@ static void __perf_event_exit_context(void *__info)
 	struct perf_event *event;
 
 	raw_spin_lock(&ctx->lock);
-	ctx_sched_out(ctx, NULL, EVENT_TIME);
+	ctx_sched_out(ctx, EVENT_TIME);
 	list_for_each_entry(event, &ctx->event_list, event_entry)
 		__perf_remove_from_context(event, cpuctx, ctx, (void *)DETACH_GROUP);
 	raw_spin_unlock(&ctx->lock);
-}
-
-static void perf_event_clear_cpumask(unsigned int cpu)
-{
-	int target[PERF_PMU_MAX_SCOPE];
-	unsigned int scope;
-	struct pmu *pmu;
-
-	cpumask_clear_cpu(cpu, perf_online_mask);
-
-	for (scope = PERF_PMU_SCOPE_NONE + 1; scope < PERF_PMU_MAX_SCOPE; scope++) {
-		const struct cpumask *cpumask = perf_scope_cpu_topology_cpumask(scope, cpu);
-		struct cpumask *pmu_cpumask = perf_scope_cpumask(scope);
-
-		target[scope] = -1;
-		if (WARN_ON_ONCE(!pmu_cpumask || !cpumask))
-			continue;
-
-		if (!cpumask_test_and_clear_cpu(cpu, pmu_cpumask))
-			continue;
-		target[scope] = cpumask_any_but(cpumask, cpu);
-		if (target[scope] < nr_cpu_ids)
-			cpumask_set_cpu(target[scope], pmu_cpumask);
-	}
-
-	/* migrate */
-	list_for_each_entry(pmu, &pmus, entry) {
-		if (pmu->scope == PERF_PMU_SCOPE_NONE ||
-		    WARN_ON_ONCE(pmu->scope >= PERF_PMU_MAX_SCOPE))
-			continue;
-
-		if (target[pmu->scope] >= 0 && target[pmu->scope] < nr_cpu_ids)
-			perf_pmu_migrate_context(pmu, cpu, target[pmu->scope]);
-	}
 }
 
 static void perf_event_exit_cpu_context(int cpu)
@@ -14376,11 +13808,6 @@ static void perf_event_exit_cpu_context(int cpu)
 
 	// XXX simplify cpuctx->online
 	mutex_lock(&pmus_lock);
-	/*
-	 * Clear the cpumasks, and migrate to other CPUs if possible.
-	 * Must be invoked before the __perf_event_exit_context.
-	 */
-	perf_event_clear_cpumask(cpu);
 	cpuctx = per_cpu_ptr(&perf_cpu_context, cpu);
 	ctx = &cpuctx->ctx;
 
@@ -14388,6 +13815,7 @@ static void perf_event_exit_cpu_context(int cpu)
 	smp_call_function_single(cpu, __perf_event_exit_context, ctx, 1);
 	cpuctx->online = 0;
 	mutex_unlock(&ctx->mutex);
+	cpumask_clear_cpu(cpu, perf_online_mask);
 	mutex_unlock(&pmus_lock);
 }
 #else
@@ -14395,42 +13823,6 @@ static void perf_event_exit_cpu_context(int cpu)
 static void perf_event_exit_cpu_context(int cpu) { }
 
 #endif
-
-static void perf_event_setup_cpumask(unsigned int cpu)
-{
-	struct cpumask *pmu_cpumask;
-	unsigned int scope;
-
-	/*
-	 * Early boot stage, the cpumask hasn't been set yet.
-	 * The perf_online_<domain>_masks includes the first CPU of each domain.
-	 * Always unconditionally set the boot CPU for the perf_online_<domain>_masks.
-	 */
-	if (cpumask_empty(perf_online_mask)) {
-		for (scope = PERF_PMU_SCOPE_NONE + 1; scope < PERF_PMU_MAX_SCOPE; scope++) {
-			pmu_cpumask = perf_scope_cpumask(scope);
-			if (WARN_ON_ONCE(!pmu_cpumask))
-				continue;
-			cpumask_set_cpu(cpu, pmu_cpumask);
-		}
-		goto end;
-	}
-
-	for (scope = PERF_PMU_SCOPE_NONE + 1; scope < PERF_PMU_MAX_SCOPE; scope++) {
-		const struct cpumask *cpumask = perf_scope_cpu_topology_cpumask(scope, cpu);
-
-		pmu_cpumask = perf_scope_cpumask(scope);
-
-		if (WARN_ON_ONCE(!pmu_cpumask || !cpumask))
-			continue;
-
-		if (!cpumask_empty(cpumask) &&
-		    cpumask_any_and(pmu_cpumask, cpumask) >= nr_cpu_ids)
-			cpumask_set_cpu(cpu, pmu_cpumask);
-	}
-end:
-	cpumask_set_cpu(cpu, perf_online_mask);
-}
 
 int perf_event_init_cpu(unsigned int cpu)
 {
@@ -14440,7 +13832,7 @@ int perf_event_init_cpu(unsigned int cpu)
 	perf_swevent_init_cpu(cpu);
 
 	mutex_lock(&pmus_lock);
-	perf_event_setup_cpumask(cpu);
+	cpumask_set_cpu(cpu, perf_online_mask);
 	cpuctx = per_cpu_ptr(&perf_cpu_context, cpu);
 	ctx = &cpuctx->ctx;
 

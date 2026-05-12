@@ -344,7 +344,7 @@ void simple_offset_remove(struct offset_ctx *octx, struct dentry *dentry)
  * User space expects the directory offset value of the replaced
  * (new) directory entry to be unchanged after a rename.
  *
- * Caller must have grabbed a slot for new_dentry in the maple_tree
+ * Caller must have grabbed a slot for new_dentry in the offset map
  * associated with new_dir, even if dentry is negative.
  */
 void simple_offset_rename(struct inode *old_dir, struct dentry *old_dentry,
@@ -384,18 +384,20 @@ int simple_offset_rename_exchange(struct inode *old_dir,
 	struct offset_ctx *new_ctx = new_dir->i_op->get_offset_ctx(new_dir);
 	u32 old_index = dentry2offset(old_dentry);
 	u32 new_index = dentry2offset(new_dentry);
+	void *entry;
 	int ret;
 
 	if (WARN_ON(!old_index || !new_index))
 		return -EINVAL;
 
-	ret = mtree_store(&new_ctx->mt, new_index, old_dentry, GFP_KERNEL);
-	if (WARN_ON(ret))
-		return ret;
+	entry = xa_store(&new_ctx->xa, new_index, old_dentry, GFP_KERNEL);
+	if (WARN_ON(xa_is_err(entry)))
+		return xa_err(entry);
 
-	ret = mtree_store(&old_ctx->mt, old_index, new_dentry, GFP_KERNEL);
-	if (WARN_ON(ret)) {
-		mtree_store(&new_ctx->mt, new_index, new_dentry, GFP_KERNEL);
+	entry = xa_store(&old_ctx->xa, old_index, new_dentry, GFP_KERNEL);
+	if (WARN_ON(xa_is_err(entry))) {
+		ret = xa_err(entry);
+		xa_store(&new_ctx->xa, new_index, new_dentry, GFP_KERNEL);
 		return ret;
 	}
 

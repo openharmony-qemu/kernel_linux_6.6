@@ -4433,7 +4433,11 @@ static struct iommu_device *intel_iommu_probe_device(struct device *dev)
 static void intel_iommu_release_device(struct device *dev)
 {
 	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct intel_iommu *iommu = info->iommu;
 
+	mutex_lock(&iommu->iopf_lock);
+	device_rbtree_remove(info);
+	mutex_unlock(&iommu->iopf_lock);
 	dmar_remove_one_dev_info(dev);
 	intel_pasid_free_table(dev);
 	dev_iommu_priv_set(dev, NULL);

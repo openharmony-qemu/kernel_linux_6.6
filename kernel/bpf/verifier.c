@@ -3445,8 +3445,17 @@ static int push_jmp_history(struct bpf_verifier_env *env,
 		return -ENOMEM;
 	p[cnt - 1].idx = env->insn_idx;
 	p[cnt - 1].prev_idx = env->prev_insn_idx;
+	p[cnt - 1].flags = env->insn_aux_data[env->insn_idx].jmp_history_flags;
 	cur->jmp_history = p;
 	cur->jmp_history_cnt = cnt;
+	return 0;
+}
+
+static u32 get_jmp_history_flags(struct bpf_verifier_state *st, int i,
+				 u32 history)
+{
+	if (history && st->jmp_history[history - 1].idx == i)
+		return st->jmp_history[history - 1].flags;
 	return 0;
 }
 
@@ -3667,7 +3676,7 @@ static bool calls_callback(struct bpf_verifier_env *env, int insn_idx);
  *   - *was* processed previously during backtracking.
  */
 static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
-			  struct backtrack_state *bt)
+			  struct backtrack_state *bt, u32 jmp_history_flags)
 {
 	const struct bpf_insn_cbs cbs = {
 		.cb_call	= disasm_kfunc_name,
@@ -3923,8 +3932,10 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			 * before it would be equally necessary to
 			 * propagate it to dreg.
 			 */
-			bt_set_reg(bt, dreg);
-			bt_set_reg(bt, sreg);
+			if (!(jmp_history_flags & BPF_JMP_HISTORY_DST_REG_STACK))
+				bt_set_reg(bt, dreg);
+			if (!(jmp_history_flags & BPF_JMP_HISTORY_SRC_REG_STACK))
+				bt_set_reg(bt, sreg);
 			 /* else dreg <cond> K
 			  * Only dreg still needs precision before
 			  * this insn, so for the K-based conditional
@@ -4348,7 +4359,8 @@ static int __mark_chain_precision(struct bpf_verifier_env *env, int regno)
 				err = 0;
 				skip_first = false;
 			} else {
-				err = backtrack_insn(env, i, subseq_idx, bt);
+				err = backtrack_insn(env, i, subseq_idx, bt,
+						     get_jmp_history_flags(st, i, history));
 			}
 			if (err == -ENOTSUPP) {
 				mark_all_scalars_precise(env, env->cur_state);
@@ -14511,6 +14523,7 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 	struct bpf_reg_state *dst_reg, *other_branch_regs, *src_reg = NULL;
 	struct bpf_reg_state *eq_branch_regs;
 	u8 opcode = BPF_OP(insn->code);
+	u8 jmp_history_flags = 0;
 	bool is_jmp32;
 	int pred = -1;
 	int err;
@@ -14545,12 +14558,19 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 				insn->src_reg);
 			return -EACCES;
 		}
+
+		if (src_reg->type == PTR_TO_STACK)
+			jmp_history_flags |= BPF_JMP_HISTORY_SRC_REG_STACK;
 	} else {
 		if (insn->src_reg != BPF_REG_0) {
 			verbose(env, "BPF_JMP/JMP32 uses reserved fields\n");
 			return -EINVAL;
 		}
 	}
+
+	if (dst_reg->type == PTR_TO_STACK)
+		jmp_history_flags |= BPF_JMP_HISTORY_DST_REG_STACK;
+	env->insn_aux_data[env->insn_idx].jmp_history_flags = jmp_history_flags;
 
 	is_jmp32 = BPF_CLASS(insn->code) == BPF_JMP32;
 

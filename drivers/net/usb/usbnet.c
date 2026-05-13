@@ -703,6 +703,7 @@ void usbnet_resume_rx(struct usbnet *dev)
 	local_bh_disable();
 	int num = 0;
 
+	local_bh_disable();
 	clear_bit(EVENT_RX_PAUSED, &dev->flags);
 
 	while ((skb = skb_dequeue(&dev->rxq_pause)) != NULL) {

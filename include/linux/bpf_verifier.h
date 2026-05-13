@@ -322,6 +322,12 @@ struct bpf_func_state {
 struct bpf_idx_pair {
 	u32 prev_idx;
 	u32 idx;
+	u32 flags;
+};
+
+enum {
+	BPF_JMP_HISTORY_DST_REG_STACK = BIT(0),
+	BPF_JMP_HISTORY_SRC_REG_STACK = BIT(1),
 };
 
 #define MAX_CALL_FRAMES 8
@@ -512,6 +518,7 @@ struct bpf_insn_aux_data {
 
 	/* below fields are initialized once */
 	unsigned int orig_idx; /* original instruction index */
+	u8 jmp_history_flags;
 	bool jmp_point;
 	bool prune_point;
 	/* ensure we check state equivalence and save state checkpoint and

@@ -17,6 +17,7 @@
 #include <linux/kmemleak.h>
 #include <linux/memory.h>
 #include <linux/mm.h>
+#include <linux/sched/mm.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
@@ -311,16 +312,21 @@ void __init __weak kasan_populate_early_vm_area_shadow(void *start,
 {
 }
 
+struct kasan_populate_vmalloc_data {
+	gfp_t gfp_mask;
+};
+
 static int kasan_populate_vmalloc_pte(pte_t *ptep, unsigned long addr,
-				      void *unused)
+				      void *opaque)
 {
+	struct kasan_populate_vmalloc_data *data = opaque;
 	unsigned long page;
 	pte_t pte;
 
 	if (likely(!pte_none(ptep_get(ptep))))
 		return 0;
 
-	page = __get_free_page(GFP_KERNEL);
+	page = __get_free_page(data ? data->gfp_mask : GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
 
@@ -338,9 +344,14 @@ static int kasan_populate_vmalloc_pte(pte_t *ptep, unsigned long addr,
 	return 0;
 }
 
-int kasan_populate_vmalloc(unsigned long addr, unsigned long size)
+int kasan_populate_vmalloc(unsigned long addr, unsigned long size, gfp_t gfp_mask)
 {
 	unsigned long shadow_start, shadow_end;
+	struct kasan_populate_vmalloc_data data = {
+		.gfp_mask = gfp_mask,
+	};
+	bool nofs, noio;
+	unsigned int flags;
 	int ret;
 
 	if (!kasan_arch_is_ready())
@@ -367,9 +378,22 @@ int kasan_populate_vmalloc(unsigned long addr, unsigned long size)
 	shadow_start = PAGE_ALIGN_DOWN(shadow_start);
 	shadow_end = PAGE_ALIGN(shadow_end);
 
+	nofs = (gfp_mask & (__GFP_FS | __GFP_IO)) == __GFP_IO;
+	noio = (gfp_mask & (__GFP_FS | __GFP_IO)) == 0;
+	if (nofs)
+		flags = memalloc_nofs_save();
+	else if (noio)
+		flags = memalloc_noio_save();
+
 	ret = apply_to_page_range(&init_mm, shadow_start,
 				  shadow_end - shadow_start,
-				  kasan_populate_vmalloc_pte, NULL);
+				  kasan_populate_vmalloc_pte, &data);
+
+	if (nofs)
+		memalloc_nofs_restore(flags);
+	else if (noio)
+		memalloc_noio_restore(flags);
+
 	if (ret)
 		return ret;
 

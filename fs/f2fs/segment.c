@@ -2672,6 +2672,7 @@ static void get_new_segment(struct f2fs_sb_info *sbi,
 	bool init = true;
 	int i;
 	int ret = 0;
+	enum stop_cp_reason reason = STOP_CP_REASON_NO_SEGMENT;
 
 	spin_lock(&free_i->segmap_lock);
 
@@ -2726,14 +2727,18 @@ find_other_zone:
 	}
 got_it:
 	/* set it as dirty segment in free segmap */
-	f2fs_bug_on(sbi, test_bit(segno, free_i->free_segmap));
+	if (test_bit(segno, free_i->free_segmap)) {
+		ret = -EFSCORRUPTED;
+		reason = STOP_CP_REASON_CORRUPTED_FREE_BITMAP;
+		goto out_unlock;
+	}
 	__set_inuse(sbi, segno);
 	*newseg = segno;
 out_unlock:
 	spin_unlock(&free_i->segmap_lock);
 
 	if (ret) {
-		f2fs_stop_checkpoint(sbi, false, STOP_CP_REASON_NO_SEGMENT);
+		f2fs_stop_checkpoint(sbi, false, reason);
 		f2fs_bug_on(sbi, 1);
 	}
 }

@@ -3740,7 +3740,6 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			   */
 		}
 	} else if (class == BPF_LDX ||
-		   is_atomic_load_insn(insn) ||
 		   is_atomic_fetch_insn(insn)) {
 		u32 load_reg = dreg;
 

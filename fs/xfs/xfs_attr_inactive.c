@@ -122,6 +122,76 @@ err:
 	return error;
 }
 
+STATIC void
+xfs_attr3_node_entry_remove(
+	struct xfs_trans	*trans,
+	struct xfs_inode	*dp,
+	struct xfs_buf		*bp,
+	int			index)
+{
+	struct xfs_da_intnode	*node = bp->b_addr;
+	struct xfs_da3_icnode_hdr ichdr;
+	struct xfs_da_node_entry *btree;
+	int			tmp;
+
+	xfs_da3_node_hdr_from_disk(dp->i_mount, &ichdr, node);
+	ASSERT(index < ichdr.count);
+
+	btree = ichdr.btree;
+	if (index < ichdr.count - 1) {
+		tmp = ichdr.count - index - 1;
+		tmp *= (uint)sizeof(xfs_da_node_entry_t);
+		memmove(&btree[index], &btree[index + 1], tmp);
+		index = ichdr.count - 1;
+	}
+	memset(&btree[index], 0, sizeof(xfs_da_node_entry_t));
+	ichdr.count--;
+	xfs_da3_node_hdr_to_disk(dp->i_mount, node, &ichdr);
+	xfs_trans_log_buf(trans, bp, 0, dp->i_mount->m_attr_geo->blksize - 1);
+}
+
+STATIC int
+xfs_attr3_leaf_init(
+	struct xfs_trans	*trans,
+	struct xfs_inode	*dp,
+	xfs_dablk_t		blkno)
+{
+	struct xfs_mount	*mp = dp->i_mount;
+	struct xfs_attr_leafblock *leaf;
+	struct xfs_attr3_icleaf_hdr ichdr;
+	struct xfs_buf		*bp;
+	int			error;
+
+	error = xfs_da_get_buf(trans, dp, blkno, &bp, XFS_ATTR_FORK);
+	if (error)
+		return error;
+	bp->b_ops = &xfs_attr3_leaf_buf_ops;
+	xfs_trans_buf_set_type(trans, bp, XFS_BLFT_ATTR_LEAF_BUF);
+	leaf = bp->b_addr;
+	memset(leaf, 0, mp->m_attr_geo->blksize);
+
+	memset(&ichdr, 0, sizeof(ichdr));
+	ichdr.firstused = mp->m_attr_geo->blksize;
+
+	if (xfs_has_crc(mp)) {
+		struct xfs_da3_blkinfo *hdr3 = bp->b_addr;
+
+		ichdr.magic = XFS_ATTR3_LEAF_MAGIC;
+		hdr3->blkno = cpu_to_be64(xfs_buf_daddr(bp));
+		hdr3->owner = cpu_to_be64(dp->i_ino);
+		uuid_copy(&hdr3->uuid, &mp->m_sb.sb_meta_uuid);
+		ichdr.freemap[0].base = sizeof(struct xfs_attr3_leaf_hdr);
+	} else {
+		ichdr.magic = XFS_ATTR_LEAF_MAGIC;
+		ichdr.freemap[0].base = sizeof(struct xfs_attr_leaf_hdr);
+	}
+	ichdr.freemap[0].size = ichdr.firstused - ichdr.freemap[0].base;
+
+	xfs_attr3_leaf_hdr_to_disk(mp->m_attr_geo, leaf, &ichdr);
+	xfs_trans_log_buf(trans, bp, 0, mp->m_attr_geo->blksize - 1);
+	return 0;
+}
+
 /*
  * Recurse (gasp!) through the attribute nodes until we find leaves.
  * We're doing a depth-first traversal in order to invalidate everything.
@@ -307,14 +377,6 @@ xfs_attr3_root_inactive(
 		xfs_trans_brelse(*trans, bp);
 		break;
 	}
-	error = bp->b_error;
-	if (error) {
-		xfs_trans_brelse(*trans, bp);
-		return error;
-	}
-	 */
-	error = xfs_trans_roll_inode(trans, dp);
-
 	return error;
 }
 

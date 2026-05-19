@@ -15,7 +15,6 @@
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
-
 #include "btintel.h"
 
 #define VERSION "0.1"

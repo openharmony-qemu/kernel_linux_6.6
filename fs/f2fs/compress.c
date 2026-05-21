@@ -938,10 +938,10 @@ void f2fs_compress_write_end_io(struct bio *bio, struct page *page)
 
 	f2fs_put_compressed_page(page);
 
-	dec_page_count(sbi, F2FS_WB_DATA);
-
-	if (refcount_dec_not_one(&cic->ref))
+	if (atomic_dec_return(&cic->pending_pages)) {
+		dec_page_count(sbi, type);
 		return;
+	}
 
 	for (i = 0; i < cic->nr_rpages; i++) {
 		WARN_ON(!cic->rpages[i]);
@@ -951,6 +951,14 @@ void f2fs_compress_write_end_io(struct bio *bio, struct page *page)
 
 	kfree(cic->rpages);
 	kfree(cic);
+
+	/*
+	 * Make sure dec_page_count() is the last access to sbi.
+	 * Once it drops the F2FS_WB_CP_DATA counter to zero, the
+	 * unmount thread can proceed to destroy sbi and
+	 * sbi->page_array_slab.
+	 */
+	dec_page_count(sbi, type);
 }
 
 static int f2fs_write_raw_pages(struct compress_ctx *cc,

@@ -2407,10 +2407,9 @@ static inline unsigned int xfrm_aevent_msgsize(struct xfrm_state *x)
 	       + nla_total_size_64bit(sizeof(struct xfrm_lifetime_cur))
 	       + nla_total_size(sizeof(struct xfrm_mark))
 	       + nla_total_size(4) /* XFRM_AE_RTHR */
+	       + nla_total_size(sizeof(x->if_id)); /* XFRMA_IF_ID */
 }
 
-	       + nla_total_size(4) /* XFRMA_SA_PCPU */
-	       + nla_total_size(sizeof(x->if_id)); /* XFRMA_IF_ID */
 static int build_aevent(struct sk_buff *skb, struct xfrm_state *x, const struct km_event *c)
 {
 	struct xfrm_aevent_id *id;

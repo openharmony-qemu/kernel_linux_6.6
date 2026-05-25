@@ -1726,6 +1726,8 @@ static DEFINE_MUTEX(vmap_purge_lock);
 /* for per-CPU blocks */
 static void purge_fragmented_blocks_allcpus(void);
 
+#define KASAN_RELEASE_BATCH_SIZE 32
+
 /*
  * Purges all lazily-freed vmap areas.
  */
@@ -1735,6 +1737,7 @@ static bool __purge_vmap_area_lazy(unsigned long start, unsigned long end)
 	unsigned int num_purged_areas = 0;
 	struct list_head local_purge_list;
 	struct vmap_area *va, *n_va;
+	unsigned int batch_count = 0;
 
 	lockdep_assert_held(&vmap_purge_lock);
 
@@ -1745,6 +1748,7 @@ static bool __purge_vmap_area_lazy(unsigned long start, unsigned long end)
 
 	if (unlikely(list_empty(&local_purge_list)))
 		goto out;
+
 
 	start = min(start,
 		list_first_entry(&local_purge_list,
@@ -1781,8 +1785,11 @@ static bool __purge_vmap_area_lazy(unsigned long start, unsigned long end)
 		atomic_long_sub(nr, &vmap_lazy_nr);
 		num_purged_areas++;
 
-		if (atomic_long_read(&vmap_lazy_nr) < resched_threshold)
+		if (need_resched() || (++batch_count >= KASAN_RELEASE_BATCH_SIZE) ||
+		    atomic_long_read(&vmap_lazy_nr) < resched_threshold) {
 			cond_resched_lock(&free_vmap_area_lock);
+			batch_count = 0;
+		}
 	}
 	spin_unlock(&free_vmap_area_lock);
 
@@ -4047,6 +4054,7 @@ struct vm_struct **pcpu_get_vm_areas(const unsigned long *offsets,
 	struct vmap_area **vas, *va;
 	struct vm_struct **vms;
 	int area, area2, last_area, term_area;
+	unsigned int batch_count;
 	unsigned long base, start, size, end, last_end, orig_start, orig_end;
 	bool purged = false;
 
@@ -4254,6 +4262,7 @@ err_free2:
 	return NULL;
 
 err_free_shadow:
+	batch_count = 0;
 	spin_lock(&free_vmap_area_lock);
 	/*
 	 * We release all the vmalloc shadows, even the ones for regions that
@@ -4269,6 +4278,11 @@ err_free_shadow:
 			kasan_release_vmalloc(orig_start, orig_end,
 				va->va_start, va->va_end);
 		vas[area] = NULL;
+
+		if (need_resched() || (++batch_count >= KASAN_RELEASE_BATCH_SIZE)) {
+			cond_resched_lock(&free_vmap_area_lock);
+			batch_count = 0;
+		}
 		kfree(vms[area]);
 	}
 	spin_unlock(&free_vmap_area_lock);

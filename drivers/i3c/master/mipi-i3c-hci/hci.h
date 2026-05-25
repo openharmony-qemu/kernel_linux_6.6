@@ -44,6 +44,7 @@ struct i3c_hci {
 	void *io_data;
 	const struct hci_cmd_ops *cmd;
 	atomic_t next_cmd_tid;
+	struct mutex control_mutex;
 	u32 caps;
 	unsigned int quirks;
 	unsigned int DAT_entries;

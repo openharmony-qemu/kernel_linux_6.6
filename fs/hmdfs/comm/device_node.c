@@ -938,6 +938,35 @@ static struct sbi_attribute sbi_write_cache_timeout_sec_attr =
 	__ATTR(write_cache_timeout_sec, 0664, sbi_write_cache_timeout_sec_show,
 	       sbi_write_cache_timeout_sec_store);
 
+static ssize_t sbi_small_file_optimization_show(struct kobject *kobj,
+					struct sbi_attribute *attr, char *buf)
+{
+	const struct hmdfs_sb_info *sbi = to_sbi(kobj);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n",
+			READ_ONCE(sbi->small_file_optimization));
+}
+
+static ssize_t sbi_small_file_optimization_store(struct kobject *kobj,
+					 struct sbi_attribute *attr,
+					 const char *buf, size_t len)
+{
+	struct hmdfs_sb_info *sbi = to_sbi(kobj);
+	bool small_file_optimization;
+	int err;
+
+	err = kstrtobool(buf, &small_file_optimization);
+	if (err)
+		return err;
+
+	WRITE_ONCE(sbi->small_file_optimization, small_file_optimization);
+	return len;
+}
+
+static struct sbi_attribute sbi_small_file_optimization_attr =
+	__ATTR(small_file_optimization, 0644, sbi_small_file_optimization_show,
+	       sbi_small_file_optimization_store);
+
 static ssize_t sbi_node_evt_cb_delay_show(struct kobject *kobj,
 					  struct sbi_attribute *attr,
 					  char *buf)
@@ -1213,6 +1242,7 @@ static struct attribute *sbi_attrs[] = {
 	&sbi_dcache_threshold_attr.attr,
 	&sbi_dcache_timeout_attr.attr,
 	&sbi_write_cache_timeout_sec_attr.attr,
+	&sbi_small_file_optimization_attr.attr,
 	&sbi_local_op_attr.attr,
 	&sbi_delay_resp_attr.attr,
 	&sbi_wb_timeout_ms_attr.attr,

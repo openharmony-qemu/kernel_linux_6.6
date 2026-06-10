@@ -149,6 +149,7 @@ struct hmdfs_sb_info {
 	struct list_head server_cache;
 	struct list_head to_delete;
 	struct mutex cache_list_lock;
+	bool small_file_optimization;
 
 	/* local operation time statistic */
 	struct server_statistic *s_server_statis;

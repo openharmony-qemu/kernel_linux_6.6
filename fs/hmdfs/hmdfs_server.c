@@ -1004,7 +1004,7 @@ static int server_lookup(struct hmdfs_peer *peer, const char *req_path,
 		goto out_noroot;
 
 	err = vfs_path_lookup(root_path.dentry, root_path.mnt, req_path,
-			            0, path);
+			      LOOKUP_DIRECTORY, path);
 	path_put(&root_path);
 out_noroot:
 	return err;

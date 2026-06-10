@@ -52,7 +52,8 @@ static struct hmdfs_time_t hmdfs_current_kernel_time(void)
 }
 
 int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
-		    __u8 file_type, struct hmdfs_open_ret *open_ret)
+		    __u8 file_type, bool prefetch,
+		    struct hmdfs_open_ret *open_ret)
 {
 	int ret;
 	int path_len = strlen(send_buf);
@@ -66,7 +67,8 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		.local_filp = NULL,
 	};
 	hmdfs_init_cmd(&sm.operations, F_OPEN);
-	hm_setprefetch(&sm.operations.reserved);
+	if (prefetch)
+		hm_setprefetch(&sm.operations.reserved);
 
 	if (!open_req) {
 		ret = -ENOMEM;

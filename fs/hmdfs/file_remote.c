@@ -24,10 +24,18 @@
 #include "hmdfs_dentryfile.h"
 #include "hmdfs_trace.h"
 
+#define HMDFS_SMALL_FILE_THRESHOLD 1024
+
 static inline bool hmdfs_remote_write_cache_expired(
 		struct hmdfs_inode_info *info)
 {
 	return time_after(jiffies, info->writecache_expire);
+}
+
+static inline bool hmdfs_remote_use_small_file_optimization(struct inode *inode)
+{
+	return READ_ONCE(hmdfs_sb(inode->i_sb)->small_file_optimization) &&
+	       i_size_read(inode) < HMDFS_SMALL_FILE_THRESHOLD;
 }
 
 enum expire_reason {
@@ -163,12 +171,14 @@ static void hmdfs_set_page_content(struct page *page, const void *data)
 	kunmap(page);
 }
 
-int hmdfs_do_open_remote(struct inode *inode, struct file *file, bool keep_cache)
+int hmdfs_do_open_remote(struct inode *inode, struct file *file,
+			 bool keep_cache, bool prefetch)
 {
 	struct hmdfs_inode_info *info = hmdfs_i(file_inode(file));
 	struct hmdfs_peer *conn = info->conn;
 	struct hmdfs_open_ret open_ret;
 	__u8 file_type = hmdfs_d(file->f_path.dentry)->file_type;
+	struct page *page = NULL;
 	char *send_buf;
 	int err = 0;
 
@@ -177,7 +187,7 @@ int hmdfs_do_open_remote(struct inode *inode, struct file *file, bool keep_cache
 		err = -ENOMEM;
 		goto out_free;
 	}
-	err = hmdfs_send_open(conn, send_buf, file_type, &open_ret);
+	err = hmdfs_send_open(conn, send_buf, file_type, prefetch, &open_ret);
 	if (err) {
 		hmdfs_err("hmdfs_send_open return failed with %d", err);
 		goto out_free;
@@ -189,16 +199,14 @@ int hmdfs_do_open_remote(struct inode *inode, struct file *file, bool keep_cache
 		goto out_free;
 	}
 
-	struct page *page = grab_cache_page(inode->i_mapping, 0);
+	if (!prefetch || open_ret.read_success != 1)
+		goto out_free;
+
+	page = grab_cache_page(inode->i_mapping, 0);
 	if (!IS_ERR(page)) {
-		if (open_ret.read_success == 1) {
-			hmdfs_set_page_content(page, open_ret.page);
-			unlock_page(page);
-		} else {
-			unlock_page(page);
-			put_page(page);
-			err = open_ret.read_success;
-		}
+		hmdfs_set_page_content(page, open_ret.page);
+		unlock_page(page);
+		info->need_reopen = false;
 	}
 
 out_free:
@@ -272,7 +280,8 @@ static int hmdfs_remote_file_reopen(struct hmdfs_inode_info *info,
 	 */
 	if (fid.id != HMDFS_INODE_INVALID_FILE_ID)
 		hmdfs_send_close(conn, &fid);
-	err = hmdfs_do_open_remote(inode, filp, true);
+	err = hmdfs_do_open_remote(inode, filp, true,
+				   hmdfs_remote_use_small_file_optimization(inode));
 	inode_unlock(inode);
 
 	spin_lock(&info->fid_lock);
@@ -359,45 +368,37 @@ int hmdfs_file_open_remote(struct inode *inode, struct file *file)
 {
 	struct hmdfs_inode_info *info = hmdfs_i(inode);
 	struct kref *ref = &(info->ref);
+	bool small_file_optimization;
 	int err = 0;
 
 	inode_lock(inode);
-	
-	// NB: we only consider small file (size <= 1 KiB) here, otherwise we may need handle reading uncached pages when the file is not actually opened
+	small_file_optimization = hmdfs_remote_use_small_file_optimization(inode);
+
 	if (kref_read(ref) == 0) {
-		// If the file is opened with intent to be modified, then we must communicate with the file holder
-		if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
-			if (info->need_reopen) {
-				err = hmdfs_do_open_remote(inode, file, false);
-				if (err >= 0) {
-					kref_init(ref);
-					info->need_reopen = err == EOPNOTSUPP ? true : false;
-					err = 0;
-				}
-			} else {
-				if (info->writecache_expire && hmdfs_remote_write_cache_expired(info)) {
-					// different from above situation, here we set writecache_expire to 0, and truncate the inode page
-					// because we can omit the repeated judgement in hmdfs_open_final_remote
-					info->writecache_expire = 0;
-					truncate_inode_pages(inode->i_mapping, 0);
-					err = hmdfs_do_open_remote(inode, file, false);
-					if (err >= 0) {
-						kref_init(ref);
-						info->need_reopen = err == EOPNOTSUPP ? true : false;
-						err = 0;
-					}
-				} else {
-					atomic64_set(&info->write_counter, 0);
-					info->getattr_isize = HMDFS_STALE_REMOTE_ISIZE;
-				}
-			}
-		} else {
-			err = hmdfs_do_open_remote(inode, file, false);
-			if (err >= 0) {
+		/*
+		 * 1. If small file optimization is disabled, we always do remote open.
+		 * 2. If small file optimization is enabled, we only do remote open when it's not a read-only open, 
+		 * or the file needs to be reopened.
+		 */
+		 if (!small_file_optimization || (file->f_flags & O_ACCMODE) != O_RDONLY || info->need_reopen) {
+			err = hmdfs_do_open_remote(inode, file, false, small_file_optimization);
+			if (err == 0)
 				kref_init(ref);
-				info->need_reopen = err == EOPNOTSUPP ? true : false;
-				err = 0;
-			}
+		} else if (info->writecache_expire && hmdfs_remote_write_cache_expired(info)) {
+			/*
+			 * Reset expiration and truncate here so
+			 * hmdfs_open_final_remote() does not need
+			 * to repeat the expiration check.
+			 */
+			info->writecache_expire = 0;
+			truncate_inode_pages(inode->i_mapping, 0);
+			err = hmdfs_do_open_remote(inode, file, false, true);
+			if (err == 0) {
+				kref_init(ref);
+			} 
+		} else {
+			atomic64_set(&info->write_counter, 0);
+			info->getattr_isize = HMDFS_STALE_REMOTE_ISIZE;
 		}
 	} else {
 		kref_get(ref);

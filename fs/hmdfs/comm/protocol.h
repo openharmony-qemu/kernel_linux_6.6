@@ -12,8 +12,9 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/namei.h>
+#include <linux/bits.h>
 
-#define HMDFS_PREFETCH_FLAG 00000001
+#define HMDFS_PREFETCH_FLAG ((__u8)BIT(0))
 
 struct hmdfs_cmd {
 	__u8 reserved;

@@ -643,10 +643,10 @@ static unsigned int uart_write_room(struct tty_struct *tty)
 	unsigned int ret;
 
 	port = uart_port_lock(state, flags);
-	if (!state->port.xmit_buf)
+	if (!state->xmit.buf)
 		ret = 0;
 	else
-		ret = kfifo_avail(&state->port.xmit_fifo);
+		ret = uart_circ_chars_free(&state->xmit);
 	uart_port_unlock(port, flags);
 	return ret;
 }

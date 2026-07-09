@@ -179,8 +179,15 @@ int hmdfs_do_open_remote(struct inode *inode, struct file *file,
 	struct hmdfs_open_ret open_ret;
 	__u8 file_type = hmdfs_d(file->f_path.dentry)->file_type;
 	struct page *page = NULL;
-	char *send_buf;
+	char *send_buf = NULL;
 	int err = 0;
+
+	open_ret.page = NULL;
+	if (prefetch) {
+		open_ret.page = kmalloc(HMDFS_PAGE_SIZE, GFP_KERNEL);
+		if (!open_ret.page)
+			prefetch = false;
+	}
 
 	send_buf = hmdfs_get_dentry_relative_path(file->f_path.dentry);
 	if (!send_buf) {
@@ -203,13 +210,14 @@ int hmdfs_do_open_remote(struct inode *inode, struct file *file,
 		goto out_free;
 
 	page = grab_cache_page(inode->i_mapping, 0);
-	if (!IS_ERR(page)) {
+	if (!IS_ERR_OR_NULL(page)) {
 		hmdfs_set_page_content(page, open_ret.page);
 		unlock_page(page);
 		info->need_reopen = false;
 	}
 
 out_free:
+	kfree(open_ret.page);
 	kfree(send_buf);
 	return err;
 }

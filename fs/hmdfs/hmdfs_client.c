@@ -1084,6 +1084,8 @@ void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, str
 	int path_len = strlen(send_buf);
 	size_t send_len = sizeof(struct drop_page_push_request) + path_len + 1;
 	struct drop_page_push_request *dpp_req = kzalloc(send_len, GFP_KERNEL);
+	if (!dpp_req) return;
+
 	struct hmdfs_send_command sm = {
 		.data = dpp_req,
 		.len = send_len,
@@ -1099,8 +1101,6 @@ void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, str
 	loff_t size = i_size_read(inode);
 
 	hmdfs_init_cmd(&sm.operations, F_DROP_PAGE_PUSH);
-	if (!dpp_req)
-		return;
 
 	dpp_req->file_size = cpu_to_le64(size);
 	dpp_req->ctime = cpu_to_le64(ctime.tv_sec);
@@ -1120,7 +1120,7 @@ void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, str
 	}
 
 	dpp_req->path_len = cpu_to_le32(path_len);
-	strcpy(dpp_req->buf, send_buf);
+	strscpy(dpp_req->buf, send_buf, send_len - sizeof(struct drop_page_push_request));
 
 	hmdfs_sendmessage_request(con, &sm);
 	kfree(dpp_req);

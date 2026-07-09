@@ -1101,7 +1101,6 @@ out:
 err_close:
 	hmdfs_close_path(info->file);
 	remove_file_from_conn(con, info->file_id);
-	hmdfs_close_path(info->file);
 err_free:
 	kfree(resp);
 	kfree(info);
@@ -2174,9 +2173,9 @@ static struct drop_page_push_recv init_drop_page_push_recv(void *data)
 		.buf = dpp_recv->buf,
 	};
 	dppr.remote_ctime.tv_sec = le64_to_cpu(dpp_recv->ctime);
-	dppr.remote_ctime.tv_nsec = le64_to_cpu(dpp_recv->ctime_nsec);
+	dppr.remote_ctime.tv_nsec = le32_to_cpu(dpp_recv->ctime_nsec);
 	dppr.stable_ctime.tv_sec = le64_to_cpu(dpp_recv->stable_ctime);
-	dppr.stable_ctime.tv_nsec = le64_to_cpu(dpp_recv->stable_ctime_nsec);
+	dppr.stable_ctime.tv_nsec = le32_to_cpu(dpp_recv->stable_ctime_nsec);
 
 	return dppr;
 }

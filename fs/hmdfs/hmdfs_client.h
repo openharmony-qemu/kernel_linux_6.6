@@ -19,7 +19,7 @@ struct hmdfs_open_ret {
 	struct hmdfs_time_t remote_ctime;
 	struct hmdfs_time_t stable_ctime;
 	__u8 read_success;
- 	__u8 page[HMDFS_PAGE_SIZE];
+	__u8 *page;
 };
 
 struct hmdfs_writepage_context {

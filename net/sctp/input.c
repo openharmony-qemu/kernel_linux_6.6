@@ -1212,10 +1212,6 @@ static struct sctp_association *__sctp_rcv_asconf_lookup(
 	if (sizeof(*asconf) + ntohs(param->p.length) > ntohs(ch->length))
 		return NULL;
 
-	/* Ensure the parameter is large enough to hold its own header */
-	if (ntohs(param->p.length) < sizeof(struct sctp_paramhdr))
-		return NULL;
-
 	af = sctp_get_af_specific(param_type2af(param->p.type));
 	if (unlikely(!af))
 		return NULL;

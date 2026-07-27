@@ -534,28 +534,30 @@ static int admv1013_properties_parse(struct admv1013_state *st)
 	st->det_en = device_property_read_bool(&spi->dev, "adi,detector-enable");
 
 	ret = device_property_read_string(&spi->dev, "adi,input-mode", &str);
-	if (ret)
+	if (ret) {
 		st->input_mode = ADMV1013_IQ_MODE;
-
-	if (!strcmp(str, "iq"))
-		st->input_mode = ADMV1013_IQ_MODE;
-	else if (!strcmp(str, "if"))
-		st->input_mode = ADMV1013_IF_MODE;
-	else
-		return -EINVAL;
+	} else {
+		if (!strcmp(str, "iq"))
+			st->input_mode = ADMV1013_IQ_MODE;
+		else if (!strcmp(str, "if"))
+			st->input_mode = ADMV1013_IF_MODE;
+		else
+			return -EINVAL;
+	}
 
 	ret = device_property_read_string(&spi->dev, "adi,quad-se-mode", &str);
-	if (ret)
+	if (ret) {
 		st->quad_se_mode = ADMV1013_SE_MODE_DIFF;
-
-	if (!strcmp(str, "diff"))
-		st->quad_se_mode = ADMV1013_SE_MODE_DIFF;
-	else if (!strcmp(str, "se-pos"))
-		st->quad_se_mode = ADMV1013_SE_MODE_POS;
-	else if (!strcmp(str, "se-neg"))
-		st->quad_se_mode = ADMV1013_SE_MODE_NEG;
-	else
-		return -EINVAL;
+	} else {
+		if (!strcmp(str, "diff"))
+			st->quad_se_mode = ADMV1013_SE_MODE_DIFF;
+		else if (!strcmp(str, "se-pos"))
+			st->quad_se_mode = ADMV1013_SE_MODE_POS;
+		else if (!strcmp(str, "se-neg"))
+			st->quad_se_mode = ADMV1013_SE_MODE_NEG;
+		else
+			return -EINVAL;
+	}
 
 	st->reg = devm_regulator_get(&spi->dev, "vcm");
 	if (IS_ERR(st->reg))

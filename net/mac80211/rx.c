@@ -4931,8 +4931,6 @@ static bool ieee80211_invoke_fast_rx(struct ieee80211_rx_data *rx,
 	res = ieee80211_rx_mesh_data(rx->sdata, rx->sta, rx->skb);
 	switch (res) {
 	case RX_QUEUED:
-<<<<<<< HEAD
-=======
 		stats->last_rx = jiffies;
 		stats->last_rate = encoded_rate;
 		return true;

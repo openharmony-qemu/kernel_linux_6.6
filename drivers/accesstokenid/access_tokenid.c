@@ -162,10 +162,6 @@ static void find_node_by_token(struct token_perm_node *root_node, uint32_t token
 
 static int add_node_to_tree(struct token_perm_node **root_node, struct token_perm_node *node)
 {
-	if (root_node == NULL) {
-		pr_err("%s: invalid root_node.\n", __func__);
-		return -EINVAL;
-	}
 	struct token_perm_node *target_node = NULL;
 	struct token_perm_node *parent_node = NULL;
 	find_node_by_token(*root_node, node->perm_data.token, &target_node, &parent_node);
@@ -190,10 +186,6 @@ static int add_node_to_tree(struct token_perm_node **root_node, struct token_per
 
 static struct token_perm_node *remove_node_by_token(struct token_perm_node **root_node, uint32_t token)
 {
-	if (root_node == NULL) {
-		pr_err("%s: invalid root_node.\n", __func__);
-		return NULL;
-	}
 	struct token_perm_node *target_node = NULL;
 	struct token_perm_node *parent_node = NULL;
 	find_node_by_token(*root_node, token, &target_node, &parent_node);

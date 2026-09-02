@@ -61,16 +61,18 @@ int hmdfs_file_release_local(struct inode *inode, struct file *file)
 {
 	struct hmdfs_file_info *gfi = hmdfs_f(file);
 	struct hmdfs_inode_info *info = hmdfs_i(inode);
+	bool modified;
 
 	if (file->f_flags & (O_RDWR | O_WRONLY))
 		atomic_dec(&info->write_opened);
 
 	spin_lock(&info->modify_lock);
- 	if (info->modified){
- 	 	hmdfs_drop_remote_cache_pages(file_dentry(file));
- 	 	info->modified = false;
- 	}
- 	spin_unlock(&info->modify_lock);
+	modified = info->modified;
+	info->modified = false;
+	spin_unlock(&info->modify_lock);
+
+	if (modified)
+		hmdfs_drop_remote_cache_pages(file_dentry(file));
 
 	file->private_data = NULL;
 	fput(gfi->lower_file);

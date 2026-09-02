@@ -460,8 +460,6 @@ static void hmdfs_update_open_response(struct hmdfs_peer *con,
 		msec_to_timespec(con->sbi->dcache_precision);
 	loff_t size = info->stat_valid ? info->stat.size :
 					 i_size_read(info->inode);
-    loff_t pos = 0;
- 	ssize_t readsize = 0;
 
 	// NB: info->real_ino is the lower_file's i_ino and i_igeneration, not the info->file's
 	resp->ino = cpu_to_le64(info->real_ino);
@@ -491,16 +489,23 @@ static void hmdfs_update_open_response(struct hmdfs_peer *con,
 		resp->stable_ctime = cpu_to_le64(precision.tv_sec);
 		resp->stable_ctime_nsec = cpu_to_le32(precision.tv_nsec);
 	}
+}
 
-	if (hm_isprefetch(cmd->operations.reserved)) {
-		readsize = kernel_read(info->file, resp->page, HMDFS_PAGE_SIZE, &pos);
-		if (readsize < 0) {
-			resp->read_success = 0;
-		} else {
-			resp->read_success = 1;
-			if (readsize != HMDFS_PAGE_SIZE)
-				memset(resp->page + readsize, 0, HMDFS_PAGE_SIZE - readsize);
-		}
+static void hmdfs_update_open_prefetch(struct hmdfs_open_info *info,
+				       struct open_prefetch *prefetch)
+{
+	loff_t pos = 0;
+	ssize_t readsize;
+
+	readsize = kernel_read(info->file, prefetch->page, HMDFS_PAGE_SIZE,
+			       &pos);
+	if (readsize < 0) {
+		prefetch->read_success = 0;
+	} else {
+		prefetch->read_success = 1;
+		if (readsize != HMDFS_PAGE_SIZE)
+			memset(prefetch->page + readsize, 0,
+			       HMDFS_PAGE_SIZE - readsize);
 	}
 }
 
@@ -698,8 +703,13 @@ void hmdfs_server_atomic_open(struct hmdfs_peer *con,
 			      struct hmdfs_head_cmd *cmd, void *data)
 {
 	int err;
+	bool is_prefetch = hm_isprefetch(cmd->operations.reserved);
+	size_t resp_size = is_prefetch ?
+			   sizeof(struct atomic_open_prefetch_response) :
+			   sizeof(struct atomic_open_response);
 	struct atomic_open_request *recv = data;
 	struct atomic_open_response *resp = NULL;
+	struct atomic_open_prefetch_response *prefetch_resp;
 	struct hmdfs_open_info *info = NULL;
 	char *file_path = recv->buf;
 	char *file = recv->buf + recv->path_len + 1;
@@ -714,19 +724,23 @@ void hmdfs_server_atomic_open(struct hmdfs_peer *con,
 	}
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
-	resp = kzalloc(sizeof(*resp), GFP_KERNEL);
+	resp = kzalloc(resp_size, GFP_KERNEL);
 	if (!resp || !info) {
 		err = -ENOMEM;
 		goto out;
 	}
 
 	err = hmdfs_server_do_atomic_open(con, cmd, recv, info, resp);
+	if (!err && is_prefetch) {
+		prefetch_resp = (struct atomic_open_prefetch_response *)resp;
+		hmdfs_update_open_prefetch(info, &prefetch_resp->prefetch);
+	}
 
 out:
 	if (err) {
 		hmdfs_send_err_response(con, cmd, err);
 	} else {
-		err = hmdfs_sendmessage_response(con, cmd, sizeof(*resp), resp,
+		err = hmdfs_sendmessage_response(con, cmd, resp_size, resp,
 						 0);
 		if (err) {
 			hmdfs_err("sending msg response failed, file_id %d, err %d",
@@ -1046,15 +1060,16 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 {
 	struct open_request *recv = data;
 	bool is_prefetch = hm_isprefetch(cmd->operations.reserved);
-	int sizeread = sizeof(struct open_response) -
-		       (is_prefetch ? 0 : HMDFS_PAGE_SIZE + 1);
+	size_t resp_size = is_prefetch ? sizeof(struct open_prefetch_response) :
+					 sizeof(struct open_response);
 	struct open_response *resp = NULL;
+	struct open_prefetch_response *prefetch_resp;
 	struct hmdfs_open_info *info = NULL;
 	int ret = 0;
 
 	trace_hmdfs_server_open_enter(con, recv);
 
-	resp = kzalloc(sizeread, GFP_KERNEL);
+	resp = kzalloc(resp_size, GFP_KERNEL);
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (!resp || !info) {
 		ret = -ENOMEM;
@@ -1079,9 +1094,13 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 		goto err_close;
 
 	hmdfs_update_open_response(con, cmd, info, resp);
+	if (is_prefetch) {
+		prefetch_resp = (struct open_prefetch_response *)resp;
+		hmdfs_update_open_prefetch(info, &prefetch_resp->prefetch);
+	}
 
 	trace_hmdfs_server_open_exit(con, resp, info->file, 0);
-	ret = hmdfs_sendmessage_response(con, cmd, sizeread, resp, 0);
+	ret = hmdfs_sendmessage_response(con, cmd, resp_size, resp, 0);
 	if (ret) {
 		hmdfs_err("sending msg response failed, file_id %d, err %d",
 			  info->file_id, ret);

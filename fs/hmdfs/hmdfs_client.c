@@ -60,6 +60,7 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 	size_t send_len = sizeof(struct open_request) + path_len + 1;
 	struct open_request *open_req = kzalloc(send_len, GFP_KERNEL);
 	struct open_response *resp;
+	struct open_prefetch_response *prefetch_resp;
 	struct hmdfs_send_command sm = {
 		.data = open_req,
 		.len = send_len,
@@ -94,12 +95,15 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 	open_ret->remote_ctime.tv_nsec = le32_to_cpu(resp->ctime_nsec);
 	open_ret->stable_ctime.tv_sec = le64_to_cpu(resp->stable_ctime);
 	open_ret->stable_ctime.tv_nsec = le32_to_cpu(resp->stable_ctime_nsec);
-	if (sm.out_len == sizeof(struct open_response)) {
-		open_ret->read_success = resp->read_success;
+	if (sm.out_len == sizeof(struct open_prefetch_response)) {
+		prefetch_resp = sm.out_buf;
+		open_ret->read_success = prefetch_resp->prefetch.read_success;
 		if (open_ret->read_success)
-			memcpy(open_ret->page, resp->page, HMDFS_PAGE_SIZE);
+			memcpy(open_ret->page, prefetch_resp->prefetch.page,
+			       HMDFS_PAGE_SIZE);
 	} else {
-		open_ret->read_success = EOPNOTSUPP;
+		// Operation not supported
+		open_ret->read_success = 0;
 	}
 
 out:
@@ -1069,8 +1073,10 @@ void hmdfs_send_drop_push(struct hmdfs_peer *con, const char *path)
 	};
 
 	hmdfs_init_cmd(&sm.operations, F_DROP_PUSH);
-	if (!dp_req)
+	if (!dp_req) {
+		hmdfs_err("cannot allocate drop_push_request");
 		return;
+	}
 
 	dp_req->path_len = cpu_to_le32(path_len);
 	strncpy(dp_req->path, path, path_len);
@@ -1084,7 +1090,10 @@ void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, str
 	int path_len = strlen(send_buf);
 	size_t send_len = sizeof(struct drop_page_push_request) + path_len + 1;
 	struct drop_page_push_request *dpp_req = kzalloc(send_len, GFP_KERNEL);
-	if (!dpp_req) return;
+	if (!dpp_req) {
+		hmdfs_err("cannot allocate drop_page_push_request");
+		return;
+	}
 
 	struct hmdfs_send_command sm = {
 		.data = dpp_req,

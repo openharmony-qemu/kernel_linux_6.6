@@ -247,6 +247,7 @@ struct cache_file_callback {
 
 int hmdfs_drop_remote_cache_dents(struct dentry *dentry);
 int hmdfs_drop_remote_cache_pages(struct dentry *dentry);
+void hmdfs_release_remote_cache(struct dentry *dentry);
 void hmdfs_send_drop_push(struct hmdfs_peer *con, const char *path);
 void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, struct inode *inode);
 void hmdfs_mark_drop_flag(uint64_t device_id, struct dentry *dentry);

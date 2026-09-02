@@ -205,6 +205,7 @@ int hmdfs_do_open_remote(struct inode *inode, struct file *file,
 		hmdfs_err("hmdfs_open_final_remote return failed with %d", err);
 		goto out_free;
 	}
+	info->fid_opened = true;
 
 	if (!prefetch || open_ret.read_success != 1)
 		goto out_free;
@@ -213,6 +214,7 @@ int hmdfs_do_open_remote(struct inode *inode, struct file *file,
 	if (!IS_ERR_OR_NULL(page)) {
 		hmdfs_set_page_content(page, open_ret.page);
 		unlock_page(page);
+		put_page(page);
 		info->need_reopen = false;
 	}
 
@@ -286,8 +288,9 @@ static int hmdfs_remote_file_reopen(struct hmdfs_inode_info *info,
 	 *                                send close (fid_1) // In case of leak
 	 *                              fid = new fid_2
 	 */
-	if (fid.id != HMDFS_INODE_INVALID_FILE_ID)
+	if (info->fid_opened && fid.id != HMDFS_INODE_INVALID_FILE_ID)
 		hmdfs_send_close(conn, &fid);
+	info->fid_opened = false;
 	err = hmdfs_do_open_remote(inode, filp, true,
 				   hmdfs_remote_use_small_file_optimization(inode));
 	inode_unlock(inode);
@@ -325,7 +328,11 @@ void hmdfs_do_close_remote(struct kref *kref)
 		container_of(kref, struct hmdfs_inode_info, ref);
 	struct hmdfs_fid fid;
 
+	if (!info->fid_opened)
+		return;
+
 	hmdfs_remote_fetch_fid(info, &fid);
+	info->fid_opened = false;
 	/* This function can return asynchronously */
 	hmdfs_send_close(info->conn, &fid);
 }
@@ -382,17 +389,19 @@ int hmdfs_file_open_remote(struct inode *inode, struct file *file)
 	inode_lock(inode);
 	small_file_optimization = hmdfs_remote_use_small_file_optimization(inode);
 
-	if (kref_read(ref) == 0) {
+	if (!info->fid_opened) {
 		/*
-		 * 1. If small file optimization is disabled, we always do remote open.
-		 * 2. If small file optimization is enabled, we only do remote open when it's not a read-only open, 
-		 * or the file needs to be reopened.
+		 * 1. If small file optimization is disabled, always do remote open.
+		 * 2. Otherwise, only do remote open for a non-read-only open or
+		 *    when the file needs to be reopened.
 		 */
-		 if (!small_file_optimization || (file->f_flags & O_ACCMODE) != O_RDONLY || info->need_reopen) {
-			err = hmdfs_do_open_remote(inode, file, false, small_file_optimization);
-			if (err == 0)
-				kref_init(ref);
-		} else if (info->writecache_expire && hmdfs_remote_write_cache_expired(info)) {
+		if (!small_file_optimization ||
+		    (file->f_flags & O_ACCMODE) != O_RDONLY ||
+		    info->need_reopen) {
+			err = hmdfs_do_open_remote(inode, file, false,
+					   small_file_optimization);
+		} else if (info->writecache_expire &&
+			   hmdfs_remote_write_cache_expired(info)) {
 			/*
 			 * Reset expiration and truncate here so
 			 * hmdfs_open_final_remote() does not need
@@ -401,15 +410,17 @@ int hmdfs_file_open_remote(struct inode *inode, struct file *file)
 			info->writecache_expire = 0;
 			truncate_inode_pages(inode->i_mapping, 0);
 			err = hmdfs_do_open_remote(inode, file, false, true);
-			if (err == 0) {
-				kref_init(ref);
-			} 
 		} else {
 			atomic64_set(&info->write_counter, 0);
 			info->getattr_isize = HMDFS_STALE_REMOTE_ISIZE;
 		}
-	} else {
-		kref_get(ref);
+	}
+
+	if (!err) {
+		if (kref_read(ref) == 0)
+			kref_init(ref);
+		else
+			kref_get(ref);
 	}
 	inode_unlock(inode);
 
@@ -493,8 +504,7 @@ int hmdfs_file_release_remote(struct inode *inode, struct file *file)
 		hmdfs_remote_del_wr_opened_inode(info->conn, info);
 
 	inode_lock(inode);
-	if (kref_read(&info->ref) > 0)
- 	 	kref_put(&info->ref, hmdfs_do_close_remote);
+	kref_put(&info->ref, hmdfs_do_close_remote);
 
 	hmdfs_remote_keep_writecache(inode, file);
 	inode_unlock(inode);

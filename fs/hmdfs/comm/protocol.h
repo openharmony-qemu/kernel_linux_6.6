@@ -220,8 +220,16 @@ struct open_response {
 	__le64 stable_ctime;
 	__le32 stable_ctime_nsec;
 	__le64 ichange_count;
+} __packed;
+
+struct open_prefetch {
 	__u8 read_success;
- 	__u8 page[HMDFS_PAGE_SIZE];
+	__u8 page[HMDFS_PAGE_SIZE];
+} __packed;
+
+struct open_prefetch_response {
+	struct open_response open_resp;
+	struct open_prefetch prefetch;
 } __packed;
 
 enum hmdfs_open_flags {
@@ -247,6 +255,11 @@ struct atomic_open_response {
 	__le32 reserved2;
 	__le64 reserved3[4];
 	struct open_response open_resp;
+} __packed;
+
+struct atomic_open_prefetch_response {
+	struct atomic_open_response atomic_open_resp;
+	struct open_prefetch prefetch;
 } __packed;
 
 struct release_request {

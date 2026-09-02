@@ -44,10 +44,10 @@ void hmdfs_message_verify_init(void)
 		sizeof(struct open_request) + PATH_MAX + 1;
 	message_length[C_REQUEST][F_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
 		MESSAGE_LEN_JUDGE_RANGE;
-	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MIN_INDEX] = sizeof(
- 	 		struct open_response) - HMDFS_PAGE_SIZE - 1;
-	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MAX_INDEX] =
+	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MIN_INDEX] =
 		sizeof(struct open_response);
+	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MAX_INDEX] =
+		sizeof(struct open_prefetch_response);
 	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
 		MESSAGE_LEN_JUDGE_RANGE;
 
@@ -59,9 +59,9 @@ void hmdfs_message_verify_init(void)
 		= MESSAGE_LEN_JUDGE_RANGE;
 	message_length[C_RESPONSE][F_ATOMIC_OPEN][HMDFS_MESSAGE_MIN_INDEX] = 0;
 	message_length[C_RESPONSE][F_ATOMIC_OPEN][HMDFS_MESSAGE_MAX_INDEX] =
-		sizeof(struct atomic_open_response);
+		sizeof(struct atomic_open_prefetch_response);
 	message_length[C_RESPONSE][F_ATOMIC_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX]
-		= MESSAGE_LEN_JUDGE_BIN;
+		= MESSAGE_LEN_JUDGE_RANGE;
 
 	message_length[C_REQUEST][F_RELEASE][HMDFS_MESSAGE_MIN_INDEX] =
 		sizeof(struct release_request);
@@ -315,9 +315,8 @@ static int verify_open_req(size_t msg_len, void *msg)
 
 static int verify_open_resp(size_t msg_len, void *msg)
 {
-	struct open_response *resp = msg;
-
-	if (msg_len != sizeof(*resp) && msg_len != sizeof(*resp) - HMDFS_PAGE_SIZE - 1)
+	if (msg_len != sizeof(struct open_response) &&
+	    msg_len != sizeof(struct open_prefetch_response))
 		return -EINVAL;
 
 	return 0;
@@ -354,9 +353,8 @@ static int verify_atomic_open_req(size_t msg_len, void *msg)
 
 static int verify_atomic_open_resp(size_t msg_len, void *msg)
 {
-	struct atomic_open_response *resp = msg;
-
-	if (msg_len != sizeof(*resp))
+	if (msg_len != sizeof(struct atomic_open_response) &&
+	    msg_len != sizeof(struct atomic_open_prefetch_response))
 		return -EINVAL;
 
 	return 0;

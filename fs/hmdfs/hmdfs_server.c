@@ -708,7 +708,8 @@ void hmdfs_server_atomic_open(struct hmdfs_peer *con,
 			   sizeof(struct atomic_open_prefetch_response) :
 			   sizeof(struct atomic_open_response);
 	struct atomic_open_request *recv = data;
-	struct atomic_open_response *resp = NULL;
+	void *resp_buf = NULL;
+	struct atomic_open_response *resp;
 	struct atomic_open_prefetch_response *prefetch_resp;
 	struct hmdfs_open_info *info = NULL;
 	char *file_path = recv->buf;
@@ -724,23 +725,27 @@ void hmdfs_server_atomic_open(struct hmdfs_peer *con,
 	}
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
-	resp = kzalloc(resp_size, GFP_KERNEL);
-	if (!resp || !info) {
+	resp_buf = kzalloc(resp_size, GFP_KERNEL);
+	if (!resp_buf || !info) {
 		err = -ENOMEM;
 		goto out;
 	}
+	if (is_prefetch) {
+		prefetch_resp = resp_buf;
+		resp = &prefetch_resp->atomic_open_resp;
+	} else {
+		resp = resp_buf;
+	}
 
 	err = hmdfs_server_do_atomic_open(con, cmd, recv, info, resp);
-	if (!err && is_prefetch) {
-		prefetch_resp = (struct atomic_open_prefetch_response *)resp;
+	if (!err && is_prefetch)
 		hmdfs_update_open_prefetch(info, &prefetch_resp->prefetch);
-	}
 
 out:
 	if (err) {
 		hmdfs_send_err_response(con, cmd, err);
 	} else {
-		err = hmdfs_sendmessage_response(con, cmd, resp_size, resp,
+		err = hmdfs_sendmessage_response(con, cmd, resp_size, resp_buf,
 						 0);
 		if (err) {
 			hmdfs_err("sending msg response failed, file_id %d, err %d",
@@ -750,7 +755,7 @@ out:
 		}
 	}
 	kfree(info);
-	kfree(resp);
+	kfree(resp_buf);
 }
 
 void hmdfs_server_release(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
@@ -1062,18 +1067,25 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 	bool is_prefetch = hm_isprefetch(cmd->operations.reserved);
 	size_t resp_size = is_prefetch ? sizeof(struct open_prefetch_response) :
 					 sizeof(struct open_response);
-	struct open_response *resp = NULL;
+	void *resp_buf = NULL;
+	struct open_response *resp;
 	struct open_prefetch_response *prefetch_resp;
 	struct hmdfs_open_info *info = NULL;
 	int ret = 0;
 
 	trace_hmdfs_server_open_enter(con, recv);
 
-	resp = kzalloc(resp_size, GFP_KERNEL);
+	resp_buf = kzalloc(resp_size, GFP_KERNEL);
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
-	if (!resp || !info) {
+	if (!resp_buf || !info) {
 		ret = -ENOMEM;
 		goto err_free;
+	}
+	if (is_prefetch) {
+		prefetch_resp = resp_buf;
+		resp = &prefetch_resp->open_resp;
+	} else {
+		resp = resp_buf;
 	}
 
 	if (path_contain_dotdot(recv->buf, recv->path_len)) {
@@ -1094,13 +1106,11 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 		goto err_close;
 
 	hmdfs_update_open_response(con, cmd, info, resp);
-	if (is_prefetch) {
-		prefetch_resp = (struct open_prefetch_response *)resp;
+	if (is_prefetch)
 		hmdfs_update_open_prefetch(info, &prefetch_resp->prefetch);
-	}
 
 	trace_hmdfs_server_open_exit(con, resp, info->file, 0);
-	ret = hmdfs_sendmessage_response(con, cmd, resp_size, resp, 0);
+	ret = hmdfs_sendmessage_response(con, cmd, resp_size, resp_buf, 0);
 	if (ret) {
 		hmdfs_err("sending msg response failed, file_id %d, err %d",
 			  info->file_id, ret);
@@ -1113,7 +1123,7 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 
 out:
 	hmdfs_close_path(info->file);
-	kfree(resp);
+	kfree(resp_buf);
 	kfree(info);
 	return;
 
@@ -1121,7 +1131,7 @@ err_close:
 	hmdfs_close_path(info->file);
 	remove_file_from_conn(con, info->file_id);
 err_free:
-	kfree(resp);
+	kfree(resp_buf);
 	kfree(info);
 	trace_hmdfs_server_open_exit(con, NULL, NULL, ret);
 	hmdfs_send_err_response(con, cmd, ret);

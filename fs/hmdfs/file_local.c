@@ -66,6 +66,10 @@ int hmdfs_file_release_local(struct inode *inode, struct file *file)
 	if (file->f_flags & (O_RDWR | O_WRONLY))
 		atomic_dec(&info->write_opened);
 
+	/*
+	 * Clear the current state before sending the drop message. A concurrent
+	 * write will set modified again and be handled by a later release.
+	 */
 	spin_lock(&info->modify_lock);
 	modified = info->modified;
 	info->modified = false;

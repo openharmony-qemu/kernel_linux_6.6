@@ -85,6 +85,20 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		ret = -ENOENT;
 	if (ret)
 		goto out;
+	if (sm.out_len == sizeof(struct open_prefetch_response)) {
+		prefetch_resp = sm.out_buf;
+		open_ret->read_success = prefetch_resp->prefetch.read_success;
+		if (open_ret->read_success)
+			memcpy(open_ret->page, prefetch_resp->prefetch.page,
+			       HMDFS_PAGE_SIZE);
+	} else if (sm.out_len == sizeof(struct open_response)) {
+		// Operation not supported
+		open_ret->read_success = 0;
+	} else {
+		hmdfs_warning("invalid open response length %zu", sm.out_len);
+		ret = -EINVAL;
+		goto out;
+	}
 	resp = sm.out_buf;
 
 	open_ret->ino = le64_to_cpu(resp->ino);
@@ -95,16 +109,6 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 	open_ret->remote_ctime.tv_nsec = le32_to_cpu(resp->ctime_nsec);
 	open_ret->stable_ctime.tv_sec = le64_to_cpu(resp->stable_ctime);
 	open_ret->stable_ctime.tv_nsec = le32_to_cpu(resp->stable_ctime_nsec);
-	if (sm.out_len == sizeof(struct open_prefetch_response)) {
-		prefetch_resp = sm.out_buf;
-		open_ret->read_success = prefetch_resp->prefetch.read_success;
-		if (open_ret->read_success)
-			memcpy(open_ret->page, prefetch_resp->prefetch.page,
-			       HMDFS_PAGE_SIZE);
-	} else {
-		// Operation not supported
-		open_ret->read_success = 0;
-	}
 
 out:
 	free_sm_outbuf(&sm);

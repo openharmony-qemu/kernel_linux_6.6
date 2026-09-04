@@ -232,6 +232,10 @@ struct open_prefetch_response {
 	struct open_prefetch prefetch;
 } __packed;
 
+static_assert(sizeof(struct open_prefetch_response) >
+	      sizeof(struct open_response),
+	      "prefetch response must be larger");
+
 enum hmdfs_open_flags {
 	HMDFS_O_TRUNC = O_TRUNC,
 	HMDFS_O_EXCL = O_EXCL,

@@ -47,7 +47,7 @@ void hmdfs_message_verify_init(void)
 	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MIN_INDEX] =
 		sizeof(struct open_response);
 	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_MAX_INDEX] =
-		sizeof(struct open_prefetch_response);
+		HMDFS_OPEN_PREFETCH_RESPONSE_SIZE;
 	message_length[C_RESPONSE][F_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX] =
 		MESSAGE_LEN_JUDGE_RANGE;
 
@@ -59,7 +59,7 @@ void hmdfs_message_verify_init(void)
 		= MESSAGE_LEN_JUDGE_RANGE;
 	message_length[C_RESPONSE][F_ATOMIC_OPEN][HMDFS_MESSAGE_MIN_INDEX] = 0;
 	message_length[C_RESPONSE][F_ATOMIC_OPEN][HMDFS_MESSAGE_MAX_INDEX] =
-		sizeof(struct atomic_open_prefetch_response);
+		HMDFS_ATOMIC_OPEN_PREFETCH_RESPONSE_SIZE;
 	message_length[C_RESPONSE][F_ATOMIC_OPEN][HMDFS_MESSAGE_LEN_JUDGE_INDEX]
 		= MESSAGE_LEN_JUDGE_RANGE;
 
@@ -316,7 +316,7 @@ static int verify_open_req(size_t msg_len, void *msg)
 static int verify_open_resp(size_t msg_len, void *msg)
 {
 	if (msg_len != sizeof(struct open_response) &&
-	    msg_len != sizeof(struct open_prefetch_response))
+	    msg_len != HMDFS_OPEN_PREFETCH_RESPONSE_SIZE)
 		return -EINVAL;
 
 	return 0;
@@ -354,7 +354,7 @@ static int verify_atomic_open_req(size_t msg_len, void *msg)
 static int verify_atomic_open_resp(size_t msg_len, void *msg)
 {
 	if (msg_len != sizeof(struct atomic_open_response) &&
-	    msg_len != sizeof(struct atomic_open_prefetch_response))
+	    msg_len != HMDFS_ATOMIC_OPEN_PREFETCH_RESPONSE_SIZE)
 		return -EINVAL;
 
 	return 0;

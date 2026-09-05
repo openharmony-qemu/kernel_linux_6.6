@@ -13,6 +13,7 @@
 #include <linux/workqueue.h>
 #include <linux/namei.h>
 #include <linux/bits.h>
+#include <linux/stddef.h>
 
 #define HMDFS_PREFETCH_FLAG ((__u8)BIT(0))
 
@@ -222,19 +223,21 @@ struct open_response {
 	__le64 ichange_count;
 } __packed;
 
-struct open_prefetch {
-	__u8 read_success;
-	__u8 page[HMDFS_PAGE_SIZE];
-} __packed;
-
 struct open_prefetch_response {
 	struct open_response open_resp;
-	struct open_prefetch prefetch;
+	__u8 read_success;
+	__u8 page[];
 } __packed;
 
-static_assert(sizeof(struct open_prefetch_response) >
+#define HMDFS_OPEN_PREFETCH_RESPONSE_SIZE \
+	(sizeof(struct open_prefetch_response) + HMDFS_PAGE_SIZE)
+
+static_assert(offsetof(struct open_prefetch_response, read_success) ==
 	      sizeof(struct open_response),
-	      "prefetch response must be larger");
+	      "prefetch data must follow open response");
+static_assert(offsetof(struct open_prefetch_response, page) ==
+	      sizeof(struct open_response) + sizeof(__u8),
+	      "prefetch page must follow read status");
 
 enum hmdfs_open_flags {
 	HMDFS_O_TRUNC = O_TRUNC,
@@ -263,8 +266,19 @@ struct atomic_open_response {
 
 struct atomic_open_prefetch_response {
 	struct atomic_open_response atomic_open_resp;
-	struct open_prefetch prefetch;
+	__u8 read_success;
+	__u8 page[];
 } __packed;
+
+#define HMDFS_ATOMIC_OPEN_PREFETCH_RESPONSE_SIZE \
+	(sizeof(struct atomic_open_prefetch_response) + HMDFS_PAGE_SIZE)
+
+static_assert(offsetof(struct atomic_open_prefetch_response, read_success) ==
+	      sizeof(struct atomic_open_response),
+	      "prefetch data must follow atomic open response");
+static_assert(offsetof(struct atomic_open_prefetch_response, page) ==
+	      sizeof(struct atomic_open_response) + sizeof(__u8),
+	      "prefetch page must follow read status");
 
 struct release_request {
 	__le64 file_ver;

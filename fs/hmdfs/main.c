@@ -751,7 +751,7 @@ static int hmdfs_init_sbi(struct hmdfs_sb_info *sbi)
 	sbi->dcache_precision = DEFAULT_DCACHE_PRECISION;
 	sbi->dcache_timeout = DEFAULT_DCACHE_TIMEOUT;
 	sbi->write_cache_timeout = DEFAULT_WRITE_CACHE_TIMEOUT;
-	sbi->small_file_optimization = true;
+	sbi->small_file_optimization = false;
 	hmdfs_init_cmd_timeout(sbi);
 	sbi->async_cb_delay = HMDFS_NODE_EVT_CB_DELAY;
 	sbi->async_req_max_active = DEFAULT_SRV_REQ_MAX_ACTIVE;

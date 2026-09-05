@@ -492,20 +492,18 @@ static void hmdfs_update_open_response(struct hmdfs_peer *con,
 }
 
 static void hmdfs_update_open_prefetch(struct hmdfs_open_info *info,
-				       struct open_prefetch *prefetch)
+				       __u8 *read_success, __u8 *page)
 {
 	loff_t pos = 0;
 	ssize_t readsize;
 
-	readsize = kernel_read(info->file, prefetch->page, HMDFS_PAGE_SIZE,
-			       &pos);
+	readsize = kernel_read(info->file, page, HMDFS_PAGE_SIZE, &pos);
 	if (readsize < 0) {
-		prefetch->read_success = 0;
+		*read_success = 0;
 	} else {
-		prefetch->read_success = 1;
+		*read_success = 1;
 		if (readsize != HMDFS_PAGE_SIZE)
-			memset(prefetch->page + readsize, 0,
-			       HMDFS_PAGE_SIZE - readsize);
+			memset(page + readsize, 0, HMDFS_PAGE_SIZE - readsize);
 	}
 }
 
@@ -705,7 +703,7 @@ void hmdfs_server_atomic_open(struct hmdfs_peer *con,
 	int err;
 	bool is_prefetch = hm_isprefetch(cmd->operations.reserved);
 	size_t resp_size = is_prefetch ?
-			   sizeof(struct atomic_open_prefetch_response) :
+			   HMDFS_ATOMIC_OPEN_PREFETCH_RESPONSE_SIZE :
 			   sizeof(struct atomic_open_response);
 	struct atomic_open_request *recv = data;
 	void *resp_buf = NULL;
@@ -739,7 +737,8 @@ void hmdfs_server_atomic_open(struct hmdfs_peer *con,
 
 	err = hmdfs_server_do_atomic_open(con, cmd, recv, info, resp);
 	if (!err && is_prefetch)
-		hmdfs_update_open_prefetch(info, &prefetch_resp->prefetch);
+		hmdfs_update_open_prefetch(info, &prefetch_resp->read_success,
+					   prefetch_resp->page);
 
 out:
 	if (err) {
@@ -1065,7 +1064,7 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 {
 	struct open_request *recv = data;
 	bool is_prefetch = hm_isprefetch(cmd->operations.reserved);
-	size_t resp_size = is_prefetch ? sizeof(struct open_prefetch_response) :
+	size_t resp_size = is_prefetch ? HMDFS_OPEN_PREFETCH_RESPONSE_SIZE :
 					 sizeof(struct open_response);
 	void *resp_buf = NULL;
 	struct open_response *resp;
@@ -1107,7 +1106,8 @@ void hmdfs_server_open(struct hmdfs_peer *con, struct hmdfs_head_cmd *cmd,
 
 	hmdfs_update_open_response(con, cmd, info, resp);
 	if (is_prefetch)
-		hmdfs_update_open_prefetch(info, &prefetch_resp->prefetch);
+		hmdfs_update_open_prefetch(info, &prefetch_resp->read_success,
+					   prefetch_resp->page);
 
 	trace_hmdfs_server_open_exit(con, resp, info->file, 0);
 	ret = hmdfs_sendmessage_response(con, cmd, resp_size, resp_buf, 0);

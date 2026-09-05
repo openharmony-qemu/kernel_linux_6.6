@@ -35,6 +35,7 @@
 
 
 #define HMDFS_PAGE_OFFSET 12
+#define HMDFS_SMALL_FILE_OPT_SUPPORTED (HMDFS_PAGE_SIZE == PAGE_SIZE)
 
 /* max xattr value size, not include '\0' */
 #define HMDFS_XATTR_SIZE_MAX	4096

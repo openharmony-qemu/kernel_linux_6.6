@@ -34,7 +34,8 @@ static inline bool hmdfs_remote_write_cache_expired(
 
 static inline bool hmdfs_remote_use_small_file_optimization(struct inode *inode)
 {
-	return READ_ONCE(hmdfs_sb(inode->i_sb)->small_file_optimization) &&
+	return HMDFS_SMALL_FILE_OPT_SUPPORTED &&
+	       READ_ONCE(hmdfs_sb(inode->i_sb)->small_file_optimization) &&
 	       i_size_read(inode) < HMDFS_SMALL_FILE_THRESHOLD;
 }
 

@@ -85,11 +85,11 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		ret = -ENOENT;
 	if (ret)
 		goto out;
-	if (sm.out_len == sizeof(struct open_prefetch_response)) {
+	if (sm.out_len == HMDFS_OPEN_PREFETCH_RESPONSE_SIZE) {
 		prefetch_resp = sm.out_buf;
-		open_ret->read_success = prefetch_resp->prefetch.read_success;
+		open_ret->read_success = prefetch_resp->read_success;
 		if (open_ret->read_success)
-			memcpy(open_ret->page, prefetch_resp->prefetch.page,
+			memcpy(open_ret->page, prefetch_resp->page,
 			       HMDFS_PAGE_SIZE);
 	} else if (sm.out_len == sizeof(struct open_response)) {
 		// Operation not supported

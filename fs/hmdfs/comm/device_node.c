@@ -958,6 +958,8 @@ static ssize_t sbi_small_file_optimization_store(struct kobject *kobj,
 	err = kstrtobool(buf, &small_file_optimization);
 	if (err)
 		return err;
+	if (small_file_optimization && !HMDFS_SMALL_FILE_OPT_SUPPORTED)
+		return -EOPNOTSUPP;
 
 	WRITE_ONCE(sbi->small_file_optimization, small_file_optimization);
 	return len;

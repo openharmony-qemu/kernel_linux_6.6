@@ -2364,6 +2364,38 @@ out_put_root:
 	path_put(&root_path);
 }
 
+void hmdfs_add_remote_page_cache_list(struct hmdfs_peer *con, struct file *file)
+{
+	struct remotecache_item *item = NULL;
+	struct remotecache_item *item_temp = NULL;
+	struct hmdfs_dentry_info *d_info = NULL;
+
+	d_info = hmdfs_d(file->f_path.dentry);
+	if (!d_info)
+		return;
+
+	/* find duplicate con */
+	mutex_lock(&d_info->remote_cache_list_lock);
+	list_for_each_entry_safe(item, item_temp,
+				 &(d_info->remote_cache_list_head), list) {
+		if (item->con->device_id == con->device_id) {
+			mutex_unlock(&d_info->remote_cache_list_lock);
+			return;
+		}
+	}
+
+	item = kzalloc(sizeof(*item), GFP_KERNEL);
+	if (!item) {
+		mutex_unlock(&d_info->remote_cache_list_lock);
+		return;
+	}
+
+	item->con = con;
+	item->drop_flag = 0;
+	list_add(&(item->list), &(d_info->remote_cache_list_head));
+	mutex_unlock(&d_info->remote_cache_list_lock);
+}
+
 int hmdfs_drop_remote_cache_dents(struct dentry *dentry)
 {
 	struct path lower_path;
@@ -2418,6 +2450,97 @@ int hmdfs_drop_remote_cache_dents(struct dentry *dentry)
 
 	kfree(relative_path);
 	return 0;
+}
+
+int hmdfs_drop_remote_cache_pages(struct dentry *dentry)
+{
+	struct remotecache_item *item = NULL;
+	struct remotecache_item *item_temp = NULL;
+	struct hmdfs_dentry_info *d_info = NULL;
+	char *relative_path = NULL;
+	LIST_HEAD(drop_list);
+
+	if (!dentry) {
+		hmdfs_err("dentry null and return");
+		return 0;
+	}
+
+	d_info = hmdfs_d(dentry);
+	if (!d_info) {
+		hmdfs_err("d_info null and return");
+		return 0;
+	}
+	relative_path = hmdfs_get_dentry_relative_path(dentry);
+	if (!relative_path) {
+		hmdfs_err("get dentry relative path failed");
+		return 0;
+	}
+	mutex_lock(&d_info->remote_cache_list_lock);
+	list_for_each_entry_safe(item, item_temp,
+				 &(d_info->remote_cache_list_head), list) {
+		if (item->drop_flag == 1) {
+			item->drop_flag = 0;
+			continue;
+		}
+		list_move_tail(&item->list, &drop_list);
+	}
+	mutex_unlock(&d_info->remote_cache_list_lock);
+
+	list_for_each_entry_safe(item, item_temp, &drop_list, list) {
+		hmdfs_send_drop_page_push(item->con, relative_path,
+					  dentry->d_inode);
+		list_del(&item->list);
+		kfree(item);
+	}
+
+	kfree(relative_path);
+	return 0;
+}
+
+void hmdfs_release_remote_cache(struct dentry *dentry)
+{
+	struct remotecache_item *item = NULL;
+	struct remotecache_item *item_temp = NULL;
+	struct hmdfs_dentry_info *d_info = NULL;
+	struct path lower_path;
+	struct inode *lower_inode;
+	char *relative_path;
+	LIST_HEAD(release_list);
+
+	if (!dentry)
+		return;
+
+	d_info = hmdfs_d(dentry);
+	if (!d_info)
+		return;
+
+	mutex_lock(&d_info->remote_cache_list_lock);
+	list_splice_init(&d_info->remote_cache_list_head, &release_list);
+	mutex_unlock(&d_info->remote_cache_list_lock);
+	if (list_empty(&release_list))
+		return;
+
+	hmdfs_get_lower_path(dentry, &lower_path);
+	lower_inode = lower_path.dentry ? d_inode(lower_path.dentry) : NULL;
+	relative_path = hmdfs_get_dentry_relative_path(dentry);
+	if (!relative_path)
+		hmdfs_err("get dentry relative path failed");
+
+	list_for_each_entry_safe(item, item_temp, &release_list, list) {
+		if (relative_path && lower_inode) {
+			if (S_ISDIR(lower_inode->i_mode))
+				hmdfs_send_drop_push(item->con, relative_path);
+			else if (S_ISREG(lower_inode->i_mode))
+				hmdfs_send_drop_page_push(item->con,
+							  relative_path,
+							  lower_inode);
+		}
+		list_del(&item->list);
+		kfree(item);
+	}
+
+	kfree(relative_path);
+	hmdfs_put_lower_path(&lower_path);
 }
 
 /* Clear the dentry cache files of target directory */

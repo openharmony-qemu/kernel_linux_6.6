@@ -12,6 +12,10 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/namei.h>
+#include <linux/bits.h>
+#include <linux/stddef.h>
+
+#define HMDFS_PREFETCH_FLAG ((__u8)BIT(0))
 
 struct hmdfs_cmd {
 	__u8 reserved;
@@ -20,8 +24,20 @@ struct hmdfs_cmd {
 	__u8 reserved2;
 } __packed;
 
+static inline bool hm_isprefetch(__u8 flag)
+{
+	return (flag & HMDFS_PREFETCH_FLAG) == HMDFS_PREFETCH_FLAG;
+}
+
+static inline void hm_setprefetch(__u8 *flag)
+{
+	*flag |= HMDFS_PREFETCH_FLAG;
+}
+
 #define HMDFS_MSG_MAGIC	      0xF7
 #define HMDFS_MAX_MESSAGE_LEN (8 * 1024 * 1024)
+
+#define HMDFS_PAGE_SIZE 4096
 
 struct hmdfs_head_cmd {
 	__u8 magic;
@@ -181,6 +197,7 @@ enum FILE_CMD {
 	F_RESERVED_7 = 26,
 	F_RESERVED_8 = 27,
 	F_ATOMIC_OPEN = 28,
+	F_DROP_PAGE_PUSH = 29,
 	F_SIZE,
 };
 
@@ -206,6 +223,22 @@ struct open_response {
 	__le64 ichange_count;
 } __packed;
 
+struct open_prefetch_response {
+	struct open_response open_resp;
+	__u8 read_success;
+	__u8 page[];
+} __packed;
+
+#define HMDFS_OPEN_PREFETCH_RESPONSE_SIZE \
+	(sizeof(struct open_prefetch_response) + HMDFS_PAGE_SIZE)
+
+static_assert(offsetof(struct open_prefetch_response, read_success) ==
+	      sizeof(struct open_response),
+	      "prefetch data must follow open response");
+static_assert(offsetof(struct open_prefetch_response, page) ==
+	      sizeof(struct open_response) + sizeof(__u8),
+	      "prefetch page must follow read status");
+
 enum hmdfs_open_flags {
 	HMDFS_O_TRUNC = O_TRUNC,
 	HMDFS_O_EXCL = O_EXCL,
@@ -230,6 +263,22 @@ struct atomic_open_response {
 	__le64 reserved3[4];
 	struct open_response open_resp;
 } __packed;
+
+struct atomic_open_prefetch_response {
+	struct atomic_open_response atomic_open_resp;
+	__u8 read_success;
+	__u8 page[];
+} __packed;
+
+#define HMDFS_ATOMIC_OPEN_PREFETCH_RESPONSE_SIZE \
+	(sizeof(struct atomic_open_prefetch_response) + HMDFS_PAGE_SIZE)
+
+static_assert(offsetof(struct atomic_open_prefetch_response, read_success) ==
+	      sizeof(struct atomic_open_response),
+	      "prefetch data must follow atomic open response");
+static_assert(offsetof(struct atomic_open_prefetch_response, page) ==
+	      sizeof(struct atomic_open_response) + sizeof(__u8),
+	      "prefetch page must follow read status");
 
 struct release_request {
 	__le64 file_ver;
@@ -330,6 +379,18 @@ struct rename_request {
 struct drop_push_request {
 	__le32 path_len;
 	char path[0];
+} __packed;
+
+struct drop_page_push_request {
+	__le64 file_size;
+	__le64 ctime;
+	__le32 ctime_nsec;
+	__le64 mtime;
+	__le32 mtime_nsec;
+	__le64 stable_ctime;
+	__le32 stable_ctime_nsec;
+	__le32 path_len;
+	char buf[0];
 } __packed;
 
 struct setattr_request {

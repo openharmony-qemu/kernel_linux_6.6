@@ -18,6 +18,8 @@ struct hmdfs_open_ret {
 	__u64 ino;
 	struct hmdfs_time_t remote_ctime;
 	struct hmdfs_time_t stable_ctime;
+	__u8 read_success;
+	__u8 *page;
 };
 
 struct hmdfs_writepage_context {
@@ -90,7 +92,8 @@ void hmdfs_client_writepage_done(struct hmdfs_inode_info *info,
 				 struct hmdfs_writepage_context *ctx);
 
 int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
-		    __u8 file_type, struct hmdfs_open_ret *open_ret);
+		    __u8 file_type, bool prefetch,
+		    struct hmdfs_open_ret *open_ret);
 void hmdfs_send_close(struct hmdfs_peer *con, const struct hmdfs_fid *fid);
 int hmdfs_send_fsync(struct hmdfs_peer *con, const struct hmdfs_fid *fid,
 		     __s64 start, __s64 end, __s32 datasync);

@@ -176,7 +176,7 @@ static void hmdfs_dev_d_release(struct dentry *dentry)
 	switch (hmdfs_d(dentry)->dentry_type) {
 	case HMDFS_LAYER_SECOND_LOCAL:
 		hmdfs_clear_cache_dents(dentry, false);
-		hmdfs_drop_remote_cache_dents(dentry);
+		hmdfs_release_remote_cache(dentry);
 		path_put(&(hmdfs_d(dentry)->lower_path));
 		break;
 	case HMDFS_LAYER_ZERO:
@@ -214,7 +214,7 @@ static void hmdfs_d_release(struct dentry *dentry)
 		return;
 
 	hmdfs_clear_cache_dents(dentry, false);
-	hmdfs_drop_remote_cache_dents(dentry);
+	hmdfs_release_remote_cache(dentry);
 	hmdfs_put_reset_lower_path(dentry);
 	kmem_cache_free(hmdfs_dentry_cachep, dentry->d_fsdata);
 	dentry->d_fsdata = NULL;

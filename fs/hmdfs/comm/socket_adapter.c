@@ -43,6 +43,7 @@ static const request_callback s_recv_callbacks[F_SIZE] = {
 	[F_SETATTR] = hmdfs_server_setattr,
 	[F_STATFS] = hmdfs_server_statfs,
 	[F_DROP_PUSH] = hmdfs_server_get_drop_push,
+	[F_DROP_PAGE_PUSH] = hmdfs_server_get_drop_page_push,
 	[F_GETATTR] = hmdfs_server_getattr,
 	[F_FSYNC] = hmdfs_server_fsync,
 	[F_SYNCFS] = hmdfs_server_syncfs,
@@ -835,6 +836,7 @@ static int hmdfs_request_recv(struct hmdfs_peer *con,
 	case F_STATFS:
 	case F_CONNECT_REKEY:
 	case F_DROP_PUSH:
+	case F_DROP_PAGE_PUSH:
 	case F_GETATTR:
 	case F_FSYNC:
 	case F_SYNCFS:
@@ -1045,6 +1047,7 @@ static int hmdfs_response_recv(struct hmdfs_peer *con,
 	case F_STATFS:
 	case F_CONNECT_REKEY:
 	case F_DROP_PUSH:
+	case F_DROP_PAGE_PUSH:
 	case F_GETATTR:
 	case F_FSYNC:
 	case F_SYNCFS:

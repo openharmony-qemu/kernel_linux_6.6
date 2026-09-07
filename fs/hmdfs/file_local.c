@@ -61,9 +61,23 @@ int hmdfs_file_release_local(struct inode *inode, struct file *file)
 {
 	struct hmdfs_file_info *gfi = hmdfs_f(file);
 	struct hmdfs_inode_info *info = hmdfs_i(inode);
+	bool modified;
 
 	if (file->f_flags & (O_RDWR | O_WRONLY))
 		atomic_dec(&info->write_opened);
+
+	/*
+	 * Clear the current state before sending the drop message. A concurrent
+	 * write will set modified again and be handled by a later release.
+	 */
+	spin_lock(&info->modify_lock);
+	modified = info->modified;
+	info->modified = false;
+	spin_unlock(&info->modify_lock);
+
+	if (modified)
+		hmdfs_drop_remote_cache_pages(file_dentry(file));
+
 	file->private_data = NULL;
 	fput(gfi->lower_file);
 	kfree(gfi);
@@ -112,6 +126,7 @@ static ssize_t hmdfs_local_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 static void hmdfs_file_modified(struct file *file)
 {
 	struct inode *inode = file_inode(file);
+	struct hmdfs_inode_info *info = hmdfs_i(inode);
 	struct dentry *dentry = file_dentry(file);
 	struct file *lower_file = hmdfs_f(file)->lower_file;
 	struct inode *lower_inode = file_inode(lower_file);
@@ -123,9 +138,13 @@ static void hmdfs_file_modified(struct file *file)
 
 	if (!hmdfs_i_merge(hmdfs_i(inode)))
 		update_inode_to_dentry(dentry, inode);
+	
+ 	spin_lock(&info->modify_lock);
+ 	info->modified = true;
+ 	spin_unlock(&info->modify_lock);
 }
 
-ssize_t hmdfs_do_write_iter(struct file *file, struct iov_iter *iter,
+ssize_t hmdfs_do_write_iter_local(struct file *file, struct iov_iter *iter,
 	loff_t *ppos)
 {
 	ssize_t ret;
@@ -154,7 +173,7 @@ out_unlock:
 
 ssize_t hmdfs_local_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
-	return hmdfs_do_write_iter(iocb->ki_filp, iter, &iocb->ki_pos);
+	return hmdfs_do_write_iter_local(iocb->ki_filp, iter, &iocb->ki_pos);
 }
 
 int hmdfs_fsync_local(struct file *file, loff_t start, loff_t end, int datasync)

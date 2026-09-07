@@ -33,8 +33,9 @@
 #define HMDFS_IOC_GET_DST_PATH _IOR(HMDFS_IOC, 3, __u32)
 
 
-#define HMDFS_PAGE_SIZE	  4096
+
 #define HMDFS_PAGE_OFFSET 12
+#define HMDFS_SMALL_FILE_OPT_SUPPORTED (HMDFS_PAGE_SIZE == PAGE_SIZE)
 
 /* max xattr value size, not include '\0' */
 #define HMDFS_XATTR_SIZE_MAX	4096
@@ -149,6 +150,7 @@ struct hmdfs_sb_info {
 	struct list_head server_cache;
 	struct list_head to_delete;
 	struct mutex cache_list_lock;
+	bool small_file_optimization;
 
 	/* local operation time statistic */
 	struct server_statistic *s_server_statis;

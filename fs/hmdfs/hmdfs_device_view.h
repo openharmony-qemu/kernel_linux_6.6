@@ -128,7 +128,9 @@ loff_t hmdfs_file_llseek_local(struct file *file, loff_t offset, int whence);
 
 ssize_t hmdfs_do_read_iter(struct file *file, struct iov_iter *iter,
 	loff_t *ppos);
-ssize_t hmdfs_do_write_iter(struct file *file, struct iov_iter *iter,
+ssize_t hmdfs_do_write_iter_merge(struct file *file, struct iov_iter *iter,
+	loff_t *ppos);
+ssize_t hmdfs_do_write_iter_local(struct file *file, struct iov_iter *iter,
 	loff_t *ppos);
 
 int hmdfs_file_release_local(struct inode *inode, struct file *file);

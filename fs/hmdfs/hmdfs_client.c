@@ -29,14 +29,38 @@ static inline void free_sm_outbuf(struct hmdfs_send_command *sm)
 	sm->out_buf = NULL;
 }
 
+static struct hmdfs_time_t msec_to_timespec(unsigned int msec)
+{
+	struct hmdfs_time_t timespec = {
+		.tv_sec = msec / MSEC_PER_SEC,
+		.tv_nsec = (msec % MSEC_PER_SEC) * NSEC_PER_MSEC,
+	};
+
+	return timespec;
+}
+
+static struct hmdfs_time_t hmdfs_current_kernel_time(void)
+{
+	struct hmdfs_time_t time;
+
+#if KERNEL_VERSION(4, 18, 0) < LINUX_VERSION_CODE
+	ktime_get_coarse_real_ts64(&time);
+#else
+	time = current_kernel_time();
+#endif
+	return time;
+}
+
 int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
-		    __u8 file_type, struct hmdfs_open_ret *open_ret)
+		    __u8 file_type, bool prefetch,
+		    struct hmdfs_open_ret *open_ret)
 {
 	int ret;
 	int path_len = strlen(send_buf);
 	size_t send_len = sizeof(struct open_request) + path_len + 1;
 	struct open_request *open_req = kzalloc(send_len, GFP_KERNEL);
 	struct open_response *resp;
+	struct open_prefetch_response *prefetch_resp;
 	struct hmdfs_send_command sm = {
 		.data = open_req,
 		.len = send_len,
@@ -44,6 +68,8 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		.local_filp = NULL,
 	};
 	hmdfs_init_cmd(&sm.operations, F_OPEN);
+	if (prefetch)
+		hm_setprefetch(&sm.operations.reserved);
 
 	if (!open_req) {
 		ret = -ENOMEM;
@@ -59,6 +85,20 @@ int hmdfs_send_open(struct hmdfs_peer *con, const char *send_buf,
 		ret = -ENOENT;
 	if (ret)
 		goto out;
+	if (sm.out_len == HMDFS_OPEN_PREFETCH_RESPONSE_SIZE) {
+		prefetch_resp = sm.out_buf;
+		open_ret->read_success = prefetch_resp->read_success;
+		if (open_ret->read_success)
+			memcpy(open_ret->page, prefetch_resp->page,
+			       HMDFS_PAGE_SIZE);
+	} else if (sm.out_len == sizeof(struct open_response)) {
+		// Operation not supported
+		open_ret->read_success = 0;
+	} else {
+		hmdfs_warning("invalid open response length %zu", sm.out_len);
+		ret = -EINVAL;
+		goto out;
+	}
 	resp = sm.out_buf;
 
 	open_ret->ino = le64_to_cpu(resp->ino);
@@ -1037,14 +1077,66 @@ void hmdfs_send_drop_push(struct hmdfs_peer *con, const char *path)
 	};
 
 	hmdfs_init_cmd(&sm.operations, F_DROP_PUSH);
-	if (!dp_req)
+	if (!dp_req) {
+		hmdfs_err("cannot allocate drop_push_request");
 		return;
+	}
 
 	dp_req->path_len = cpu_to_le32(path_len);
 	strncpy(dp_req->path, path, path_len);
 
 	hmdfs_sendmessage_request(con, &sm);
 	kfree(dp_req);
+}
+
+void hmdfs_send_drop_page_push(struct hmdfs_peer *con, const char *send_buf, struct inode *inode)
+{
+	int path_len = strlen(send_buf);
+	size_t send_len = sizeof(struct drop_page_push_request) + path_len + 1;
+	struct drop_page_push_request *dpp_req = kzalloc(send_len, GFP_KERNEL);
+	if (!dpp_req) {
+		hmdfs_err("cannot allocate drop_page_push_request");
+		return;
+	}
+
+	struct hmdfs_send_command sm = {
+		.data = dpp_req,
+		.len = send_len,
+		.out_buf = NULL,
+		.local_filp = NULL,
+	};
+
+	struct hmdfs_time_t current_time = hmdfs_current_kernel_time();
+	struct hmdfs_time_t ctime = inode->__i_ctime;
+	struct hmdfs_time_t precision =
+		msec_to_timespec(con->sbi->dcache_precision);
+
+	loff_t size = i_size_read(inode);
+
+	hmdfs_init_cmd(&sm.operations, F_DROP_PAGE_PUSH);
+
+	dpp_req->file_size = cpu_to_le64(size);
+	dpp_req->ctime = cpu_to_le64(ctime.tv_sec);
+	dpp_req->ctime_nsec = cpu_to_le32(ctime.tv_nsec);
+
+	precision = hmdfs_time_add(ctime, precision);
+	if (hmdfs_time_compare(&current_time, &ctime) < 0) {
+		dpp_req->stable_ctime = cpu_to_le64(0);
+		dpp_req->stable_ctime_nsec = cpu_to_le32(0);
+	} else if (hmdfs_time_compare(&current_time, &ctime) >= 0 &&
+		   hmdfs_time_compare(&current_time, &precision) < 0) {
+		dpp_req->stable_ctime = dpp_req->ctime;
+		dpp_req->stable_ctime_nsec = dpp_req->ctime_nsec;
+	} else {
+		dpp_req->stable_ctime = cpu_to_le64(precision.tv_sec);
+		dpp_req->stable_ctime_nsec = cpu_to_le32(precision.tv_nsec);
+	}
+
+	dpp_req->path_len = cpu_to_le32(path_len);
+	strscpy(dpp_req->buf, send_buf, send_len - sizeof(struct drop_page_push_request));
+
+	hmdfs_sendmessage_request(con, &sm);
+	kfree(dpp_req);
 }
 
 static void *hmdfs_get_msg_next(struct hmdfs_peer *peer, int *id)

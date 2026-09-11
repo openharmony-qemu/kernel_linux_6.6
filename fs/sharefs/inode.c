@@ -126,6 +126,80 @@ out:
 	return err;
 }
 
+static int sharefs_symlink(struct mnt_idmap *idmap, struct inode *dir,
+			   struct dentry *dentry, const char *symname)
+{
+	struct dentry *lower_parent_dentry;
+	struct path lower_path;
+	const struct cred *saved_cred;
+	int err;
+
+	sharefs_info("create symlink name=%pd", dentry);
+	saved_cred = sharefs_override_file_fsids(dir, NULL);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		goto out_err;
+	}
+
+	sharefs_get_lower_path(dentry, &lower_path);
+	err = mnt_want_write(lower_path.mnt);
+	if (err)
+		goto out_put;
+
+	lower_parent_dentry = lock_parent(lower_path.dentry);
+	err = vfs_symlink(&nop_mnt_idmap, d_inode(lower_parent_dentry),
+			  lower_path.dentry, symname);
+	if (err)
+		goto out;
+
+	err = sharefs_interpose(dentry, dir->i_sb, &lower_path);
+	if (err)
+		goto out;
+
+	SHAREFS_I(d_inode(dentry))->perm =
+		perm_get_next_level_override(SHAREFS_I(dir)->perm);
+	fsstack_copy_attr_times(dir, sharefs_lower_inode(dir));
+	fsstack_copy_inode_size(dir, d_inode(lower_parent_dentry));
+
+out:
+	unlock_dir(lower_parent_dentry);
+	mnt_drop_write(lower_path.mnt);
+out_put:
+	sharefs_put_lower_path(dentry, &lower_path);
+	sharefs_revert_fsids(saved_cred);
+out_err:
+	return err;
+}
+
+static const char *sharefs_get_link(struct dentry *dentry, struct inode *inode,
+				    struct delayed_call *done)
+{
+	struct path lower_path;
+	const struct cred *saved_cred;
+	const char *link;
+
+	/* Accessing the lower path and overriding credentials can block. */
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
+
+	sharefs_info("read symlink name=%pd", dentry);
+	saved_cred = sharefs_override_file_fsids(inode, NULL);
+	if (!saved_cred) {
+		link = ERR_PTR(-ENOMEM);
+		goto out_err;
+	}
+
+	sharefs_get_lower_path(dentry, &lower_path);
+	/* Let the VFS release the lower link body after it has finished using it. */
+	link = vfs_get_link(lower_path.dentry, done);
+	if (!IS_ERR(link))
+		fsstack_copy_attr_atime(inode, d_inode(lower_path.dentry));
+	sharefs_put_lower_path(dentry, &lower_path);
+	sharefs_revert_fsids(saved_cred);
+out_err:
+	return link;
+}
+
 static int sharefs_mkdir(struct mnt_idmap *idmap, struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	int err;
@@ -410,7 +484,7 @@ out_err:
 const struct inode_operations sharefs_symlink_iops = {
 	.permission	= sharefs_permission,
 	.getattr	= sharefs_getattr,
-	.get_link	= NULL,
+	.get_link	= sharefs_get_link,
 	.listxattr	= sharefs_listxattr,
 };
 
@@ -432,6 +506,7 @@ const struct inode_operations sharefs_dir_override_iops = {
 	.rmdir		= sharefs_rmdir,
 	.rename		= sharefs_rename,
 	.create		= sharefs_create,
+	.symlink	= sharefs_symlink,
 	.mkdir		= sharefs_mkdir,
 };
 

@@ -236,11 +236,9 @@ void init_smb3_0_server(struct ksmbd_conn *conn)
 	if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB3_MULTICHANNEL)
 		conn->vals->capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
 }
-
 /**
  * init_smb3_02_server() - initialize a smb server connection with smb3.02
  *			command dispatcher
- * @conn:	connection instance
  */
 void init_smb3_02_server(struct ksmbd_conn *conn)
 {

@@ -3365,7 +3365,16 @@ static void mptcp_destroy_common(struct mptcp_sock *msk)
 	 * inet_sock_destruct() will dispose it
 	 */
 	mptcp_token_destroy(msk);
+
+	spin_lock_bh(&msk->pm.lock);
+	msk->pm.status |= BIT(MPTCP_PM_DESTROYING);
+	spin_unlock_bh(&msk->pm.lock);
+
 	mptcp_pm_destroy(msk);
+
+	/* Free the userspace local address list unconditionally: the socket
+	 * can be reused (mptcp_disconnect()) and re-selected to a different PM
+	 */
 }
 
 static int mptcp_disconnect(struct sock *sk, int flags)

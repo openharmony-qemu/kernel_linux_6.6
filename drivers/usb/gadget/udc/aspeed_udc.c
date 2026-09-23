@@ -1440,9 +1440,9 @@ static void ast_udc_cleanup(struct platform_device *pdev)
 	unsigned long flags;
 	u32 ctrl;
 
-		return -EBUSY;
 	spin_lock_irqsave(&udc->lock, flags);
 
+	/* Disable upstream port connection */
 	ctrl = ast_udc_read(udc, AST_UDC_FUNC_CTRL) & ~USB_UPSTREAM_EN;
 	ast_udc_write(udc, ctrl, AST_UDC_FUNC_CTRL);
 
@@ -1451,13 +1451,14 @@ static void ast_udc_cleanup(struct platform_device *pdev)
 	spin_unlock_irqrestore(&udc->lock, flags);
 
 	if (udc->ep0_buf)
+		dma_free_coherent(&pdev->dev,
 				  AST_UDC_EP_DMA_SIZE * AST_UDC_NUM_ENDPOINTS,
 				  udc->ep0_buf,
 				  udc->ep0_buf_dma);
 
 	udc->ep0_buf = NULL;
+}
 
-	return 0;
 static void ast_udc_remove(struct platform_device *pdev)
 {
 	struct ast_udc_dev *udc = platform_get_drvdata(pdev);
@@ -1476,8 +1477,6 @@ static void ast_udc_remove(struct platform_device *pdev)
 	}
 
 	ast_udc_cleanup(pdev);
-}
-
 }
 
 static int ast_udc_probe(struct platform_device *pdev)
@@ -1605,7 +1604,7 @@ MODULE_DEVICE_TABLE(of, ast_udc_of_dt_ids);
 
 static struct platform_driver ast_udc_driver = {
 	.probe			= ast_udc_probe,
-	.remove			= ast_udc_remove,
+	.remove_new		= ast_udc_remove,
 	.driver			= {
 		.name			= KBUILD_MODNAME,
 		.of_match_table		= ast_udc_of_dt_ids,

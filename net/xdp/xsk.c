@@ -282,10 +282,10 @@ static int __xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
 			goto err_alloc;
 
 		xskb = container_of(xsk_xdp, struct xdp_buff_xsk, xdp);
-		if (unlikely(!list_empty(&xskb->list_node)))
+		if (unlikely(!list_empty(&xskb->xskb_list_node)))
 			goto err_alloc;
 
-		list_add_tail(&xskb->list_node, &xsk_buffs);
+		list_add_tail(&xskb->xskb_list_node, &xsk_buffs);
 	}
 
 	do {
@@ -293,8 +293,8 @@ static int __xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
 		u32 copied;
 
 		xskb = list_first_entry(&xsk_buffs, struct xdp_buff_xsk,
-					list_node);
-		list_del_init(&xskb->list_node);
+					xskb_list_node);
+		list_del_init(&xskb->xskb_list_node);
 		xsk_xdp = &xskb->xdp;
 		copy_to = xsk_xdp->data - meta_len;
 
@@ -306,15 +306,15 @@ static int __xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
 	} while (rem);
 
 	return 0;
-}
 
 err_alloc:
-	list_for_each_entry_safe(xskb, tmp, &xsk_buffs, list_node) {
-		list_del_init(&xskb->list_node);
+	list_for_each_entry_safe(xskb, tmp, &xsk_buffs, xskb_list_node) {
+		list_del_init(&xskb->xskb_list_node);
 		xsk_buff_free(&xskb->xdp);
 	}
 	xs->rx_dropped++;
 	return -ENOMEM;
+}
 
 static bool xsk_tx_writeable(struct xdp_sock *xs)
 {

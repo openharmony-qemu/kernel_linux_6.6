@@ -826,7 +826,7 @@ int ni_create_attr_list(struct ntfs_inode *ni)
 	 */
 	lsize = 0;
 	attr = NULL;
-	while ((attr = mi_enum_attr(ni, &ni->mi, attr)))
+	while ((attr = mi_enum_attr(&ni->mi, attr)))
 		lsize += le_size(attr->name_len);
 
 	if (!lsize)

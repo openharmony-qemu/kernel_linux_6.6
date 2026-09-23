@@ -187,6 +187,7 @@ static int __acpi_processor_start(struct acpi_device *device)
 
 err_power_exit:
 	acpi_processor_power_exit(pr);
+
 	return result;
 }
 
@@ -271,7 +272,7 @@ static int __init acpi_processor_driver_init(void)
 
 	result = driver_register(&acpi_processor_driver);
 	if (result < 0)
-		return result;
+		goto err_notifier;
 
 	result = cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN,
 					   "acpi/cpu-drv:online",
@@ -286,6 +287,12 @@ static int __init acpi_processor_driver_init(void)
 	return 0;
 err:
 	driver_unregister(&acpi_processor_driver);
+err_notifier:
+	if (acpi_processor_cpufreq_init) {
+		cpufreq_unregister_notifier(&acpi_processor_notifier_block,
+					    CPUFREQ_POLICY_NOTIFIER);
+		acpi_processor_cpufreq_init = false;
+	}
 	return result;
 }
 

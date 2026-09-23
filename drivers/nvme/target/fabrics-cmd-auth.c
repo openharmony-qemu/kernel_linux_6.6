@@ -261,13 +261,13 @@ void nvmet_execute_auth_send(struct nvmet_req *req)
 			goto done_failure1;
 		/* Validate negotiation parameters */
 		dhchap_status = nvmet_auth_negotiate(req, d, tl);
-		if (status == 0)
+		if (dhchap_status == 0)
 			req->sq->dhchap_step =
 				NVME_AUTH_DHCHAP_MESSAGE_CHALLENGE;
 		else {
 			req->sq->dhchap_step =
 				NVME_AUTH_DHCHAP_MESSAGE_FAILURE1;
-			req->sq->dhchap_status = status;
+			req->sq->dhchap_status = dhchap_status;
 			status = 0;
 		}
 		goto done_kfree;

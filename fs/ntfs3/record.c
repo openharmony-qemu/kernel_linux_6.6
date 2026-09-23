@@ -323,12 +323,12 @@ struct ATTRIB *mi_enum_attr(struct mft_inode *mi, struct ATTRIB *attr)
 #else
 		/* Check evcn fits into 32 bits. */
 		if (evcn != U64_MAX && evcn >= (1ull << 32))
-			goto out;
+			return NULL;
 #endif
 	} else {
 		/* Check out of volume for normal attribute. */
 		if (evcn != U64_MAX && evcn >= mi->sbi->used.bitmap.nbits)
-			goto out;
+			return NULL;
 	}
 
 	data_size = le64_to_cpu(attr->nres.data_size);

@@ -306,7 +306,6 @@ static int __xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
 	} while (rem);
 
 	return 0;
-}
 
 err_alloc:
 	list_for_each_entry_safe(xskb, tmp, &xsk_buffs, list_node) {
@@ -315,6 +314,7 @@ err_alloc:
 	}
 	xs->rx_dropped++;
 	return -ENOMEM;
+}
 
 static bool xsk_tx_writeable(struct xdp_sock *xs)
 {

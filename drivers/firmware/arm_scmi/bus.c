@@ -286,7 +286,7 @@ int scmi_driver_register(struct scmi_driver *driver, struct module *owner,
 
 	retval = driver_register(&driver->driver);
 	if (retval) {
-		scmi_protocol_table_unregister(driver->id_table);
+		scmi_protocol_device_unrequest(driver->id_table);
 		return retval;
 	}
 

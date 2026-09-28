@@ -11,6 +11,7 @@
 #include "server.h"
 #include "smb_common.h"
 #include "mgmt/ksmbd_ida.h"
+#include "mgmt/user_session.h"
 #include "connection.h"
 #include "transport_tcp.h"
 #include "transport_rdma.h"
@@ -77,6 +78,7 @@ struct ksmbd_conn *ksmbd_conn_alloc(void)
 	init_waitqueue_head(&conn->r_count_q);
 	INIT_LIST_HEAD(&conn->conns_list);
 	INIT_LIST_HEAD(&conn->requests);
+	INIT_LIST_HEAD(&conn->preauth_sess_table);
 	INIT_LIST_HEAD(&conn->async_requests);
 	spin_lock_init(&conn->request_lock);
 	spin_lock_init(&conn->credits_lock);
@@ -330,6 +332,7 @@ int ksmbd_conn_handler_loop(void *p)
 		kvfree(conn->request_buf);
 		conn->request_buf = NULL;
 
+	ksmbd_preauth_session_destroy(conn);
 recheck:
 		if (atomic_read(&conn->req_running) + 1 > max_req) {
 			wait_event_interruptible(conn->req_running_q,

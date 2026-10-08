@@ -77,8 +77,13 @@ static int epfs_getattr(const struct path *path, struct kstat *stat,
 		ret = -ENOENT;
 		goto out_getattr;
 	}
-	ret = vfs_getattr(&(origin_file->f_path), &origin_stat, request_mask,
-			  flags);
+    if (flags & AT_GETATTR_NOSEC) {
+        ret = vfs_getattr_nosec(&(origin_file->f_path), &origin_stat, request_mask,
+            flags);
+    } else {
+        ret = vfs_getattr(&(origin_file->f_path), &origin_stat, request_mask,
+            flags);
+    }
 	if (ret)
 		goto out_getattr;
 	fsstack_copy_attr_all(inode, file_inode(origin_file));

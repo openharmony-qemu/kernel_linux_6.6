@@ -1796,6 +1796,10 @@ static inline void xhci_write_64(struct xhci_hcd *xhci,
  * 0.96 hardware from AMD and NEC was found to ignore unchained isochronous link TRBs when
  * "resynchronizing the pipe" after a Missed Service Error.
  */
+static inline int xhci_link_trb_quirk(struct xhci_hcd *xhci)
+{
+	return xhci->quirks & XHCI_LINK_TRB_QUIRK;
+}
 static inline bool xhci_link_chain_quirk(struct xhci_hcd *xhci, enum xhci_ring_type type)
 {
 	return (xhci->quirks & XHCI_LINK_TRB_QUIRK) ||

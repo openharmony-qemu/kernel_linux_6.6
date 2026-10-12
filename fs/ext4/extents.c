@@ -45,6 +45,8 @@
 
 #define EXT4_EXT_DATA_VALID1	0x8  /* first half contains valid data */
 #define EXT4_EXT_DATA_VALID2	0x10 /* second half contains valid data */
+#define EXT4_EXT_DATA_ENTIRE_VALID1	0x8  /* has entirely valid data */
+#define EXT4_EXT_DATA_PARTIAL_VALID1	0x10 /* has partially valid data */
 
 static __le32 ext4_extent_block_csum(struct inode *inode,
 				     struct ext4_extent_header *eh)
@@ -3381,7 +3383,7 @@ static int ext4_split_extent(handle_t *handle,
 			split_flag1 |= map->m_lblk > ee_block ?
 				       EXT4_EXT_DATA_PARTIAL_VALID1 :
 				       EXT4_EXT_DATA_ENTIRE_VALID1;
-		path = ext4_split_extent_at(handle, inode, path,
+		path = ext4_split_extent_at(handle, inode, &path,
 				map->m_lblk + map->m_len, split_flag1, flags1);
 		if (err)
 			goto out;
@@ -4387,7 +4389,7 @@ got_allocated_blocks:
 		map->m_flags |= EXT4_MAP_UNWRITTEN;
 	}
 
-	path = ext4_ext_insert_extent(handle, inode, path, &newex, flags);
+	path = ext4_ext_insert_extent(handle, inode, &path, &newex, flags);
 	if (IS_ERR(path)) {
 		err = PTR_ERR(path);
 		/*

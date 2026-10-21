@@ -37,6 +37,18 @@
 #define ROOT_GID 		KGIDT_INIT(OID_ROOT)
 #define SHAREFS_SUPER_MAGIC 0x20230212
 
+/*
+ * "Reverse umask" for chmod control: the u/g r/w bits of a chmod request
+ * are force OR-ed with this mask (see sharefs_setattr). Fixed default per
+ * requirement alignment — no runtime configuration; if a policy
+ * source is needed later, plumb it through sharefs_parse_options().
+ *
+ * Contract: a mask value may only contain the u/g r/w bits — i.e. it must
+ * stay a subset of 0660, never x, other-class or special bits.
+ * sharefs_setattr force ORs the mask unmasked and relies on this.
+ */
+#define SHAREFS_PERM_MASK_DEFAULT	0660
+
 /* useful for tracking code reachability */
 #define UDBG printk(KERN_DEFAULT "DBG:%s:%s:%d\n", __FILE__, __func__, __LINE__)
 
@@ -67,6 +79,8 @@ struct sharefs_sb_info {
 	bool override;
 	bool override_support_delete;
 	bool sniffer;
+	/* chmod control: u/g r/w bits forced to this mask ("reverse umask") */
+	unsigned int share_perm_mask;
 };
 
 /* operations vectors defined in specific files */

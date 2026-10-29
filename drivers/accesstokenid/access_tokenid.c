@@ -162,6 +162,10 @@ static void find_node_by_token(struct token_perm_node *root_node, uint32_t token
 
 static int add_node_to_tree(struct token_perm_node **root_node, struct token_perm_node *node)
 {
+	if (root_node == NULL || node == NULL) {
+		pr_err("%s: invalid root_node.\n", __func__);
+		return -EINVAL;
+	}
 	struct token_perm_node *target_node = NULL;
 	struct token_perm_node *parent_node = NULL;
 	find_node_by_token(*root_node, node->perm_data.token, &target_node, &parent_node);
@@ -186,6 +190,10 @@ static int add_node_to_tree(struct token_perm_node **root_node, struct token_per
 
 static struct token_perm_node *remove_node_by_token(struct token_perm_node **root_node, uint32_t token)
 {
+	if (root_node == NULL) {
+		pr_err("%s: invalid root_node.\n", __func__);
+		return NULL;
+	}
 	struct token_perm_node *target_node = NULL;
 	struct token_perm_node *parent_node = NULL;
 	find_node_by_token(*root_node, token, &target_node, &parent_node);
@@ -246,10 +254,9 @@ int access_tokenid_remove_permission(struct file *file, void __user *uarg)
 
 	write_lock(&token_rwlock);
 	struct token_perm_node *target_node = remove_node_by_token(&g_token_perm_root, token);
-	write_unlock(&token_rwlock);
-
 	if (target_node != NULL)
 		kmem_cache_free(g_cache, target_node);
+	write_unlock(&token_rwlock);
 
 	return 0;
 }
@@ -304,12 +311,15 @@ int access_tokenid_get_permission(struct file *file, void __user *uarg)
 	struct token_perm_node *parent_node = NULL;
 	read_lock(&token_rwlock);
 	find_node_by_token(g_token_perm_root, get_perm_data.token, &target_node, &parent_node);
-	read_unlock(&token_rwlock);
-	if (target_node == NULL)
+	if (target_node == NULL) {
+		read_unlock(&token_rwlock);
 		return -ENODATA;
+	}
 
 	uint32_t bit_idx = get_perm_data.op_code % UINT32_T_BITS;
-	return (target_node->perm_data.perm[idx] & ((uint32_t)0x01 << bit_idx)) >> bit_idx;
+	int ret = (target_node->perm_data.perm[idx] & ((uint32_t)0x01 << bit_idx)) >> bit_idx;
+	read_unlock(&token_rwlock);
+	return ret;
 }
 
 static long access_tokenid_ioctl(struct file *file, unsigned int cmd,

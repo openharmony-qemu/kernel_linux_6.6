@@ -449,7 +449,35 @@ static int sharefs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, struc
 		truncate_setsize(inode, ia->ia_size);
 	}
 
-	lower_ia.ia_valid &= ~(ATTR_MODE|ATTR_UID|ATTR_GID);
+	/*
+	 * chmod control ("reverse umask"), semantics fixed in the
+	 * requirement alignment:
+	 * - the u/g r/w bits are force OR-ed with sbi->share_perm_mask
+	 *   (pure OR: bits set in the mask cannot be cleared by chmod);
+	 * - u/g x bits and other-class bits follow the chmod request
+	 *   (directories are allowed to be locked by chmod);
+	 * - suid/sgid/sticky bits are dropped, never passed through;
+	 * - chown (ATTR_UID/ATTR_GID) is still silently dropped as before
+	 *   (stripped from lower_ia below, so chown() itself returns 0).
+	 *
+	 * Ordering contract (review-confirmed, do not reorder):
+	 * - the request is read from ia->ia_mode AFTER setattr_prepare()
+	 *   above -- prepare() may adjust the request (e.g. strip S_ISGID
+	 *   via in_group_or_capable) and those adjustments are inherited;
+	 *   prepare() never rejects a MODE change for sgid+x reasons (it
+	 *   strips instead), so no legitimate chmod gets refused here;
+	 * - lower_ia.ia_mode computed here is final -- nothing below
+	 *   modifies it before notify_change().
+	 */
+	if (ia->ia_valid & ATTR_MODE) {
+		unsigned int perm_mask = SHAREFS_SB(inode->i_sb)->share_perm_mask;
+
+		lower_ia.ia_mode = (ia->ia_mode & ~(S_ISUID | S_ISGID | S_ISVTX)) |
+				   perm_mask;
+		lower_ia.ia_valid |= ATTR_MODE;
+	}
+
+	lower_ia.ia_valid &= ~(ATTR_UID | ATTR_GID);
 
 	/* notify the (possibly copied-up) lower inode */
 	/*

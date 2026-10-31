@@ -75,6 +75,7 @@ TARGETS += rseq
 TARGETS += rtc
 TARGETS += seccomp
 TARGETS += sgx
+TARGETS += sharefs
 TARGETS += sigaltstack
 TARGETS += size
 TARGETS += sparc64

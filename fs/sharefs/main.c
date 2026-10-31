@@ -74,6 +74,7 @@ static int sharefs_fill_super(struct super_block *sb, void *data, int silent)
 		err = -ENOMEM;
 		goto out_pput;
 	}
+	SHAREFS_SB(sb)->share_perm_mask = SHAREFS_PERM_MASK_DEFAULT;
 
 	/* set the lower superblock field of upper superblock */
 	lower_sb = lower_path.dentry->d_sb;

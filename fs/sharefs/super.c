@@ -6,6 +6,7 @@
  * Copyright (c) 2003-2022 The Research Foundation of SUNY
  */
 #include <linux/backing-dev-defs.h>
+#include <linux/ioctl.h>
 #include <linux/ratelimit.h>
 #include <linux/slab.h>
 #include <linux/parser.h>

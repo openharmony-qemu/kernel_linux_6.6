@@ -10,6 +10,7 @@
 #ifndef _SHAREFS_H_
 #define _SHAREFS_H_
 
+#include <linux/build_bug.h>
 #include <linux/dcache.h>
 #include <linux/file.h>
 #include <linux/fs.h>

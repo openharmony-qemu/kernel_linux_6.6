@@ -17,6 +17,7 @@ enum {
 	OPT_OVERRIDE,
 	OPT_OVERRIDE_SUPPORT_DELETE,
 	OPT_SNIFFER,
+	OPT_CASE_SENSITIVE,
 	OPT_ERR,
 };
 
@@ -25,6 +26,7 @@ static match_table_t sharefs_tokens = {
 	{ OPT_OVERRIDE, "override" },
 	{ OPT_OVERRIDE_SUPPORT_DELETE, "override_support_delete" },
 	{ OPT_SNIFFER, "sniffer" },
+	{ OPT_CASE_SENSITIVE, "case_sensitive" },
 	{ OPT_ERR, NULL }
 };
 
@@ -73,6 +75,9 @@ int sharefs_parse_options(struct sharefs_sb_info *sbi, const char *data)
 			break;
 		case OPT_SNIFFER:
 			sbi->sniffer = true;
+			break;
+		case OPT_CASE_SENSITIVE:
+			sbi->case_sensitive = true;
 			break;
 		default:
 			err = -EINVAL;
@@ -211,10 +216,29 @@ void sharefs_destroy_inode_cache(void)
 		kmem_cache_destroy(sharefs_inode_cachep);
 }
 
+
+/* show the effective mount options in /proc/mounts */
+static int sharefs_show_options(struct seq_file *m, struct dentry *root)
+{
+	struct sharefs_sb_info *sbi = SHAREFS_SB(root->d_sb);
+
+	seq_printf(m, ",user_id=%u", sbi->user_id);
+	if (sbi->override)
+		seq_puts(m, ",override");
+	if (sbi->override_support_delete)
+		seq_puts(m, ",override_support_delete");
+	if (sbi->sniffer)
+		seq_puts(m, ",sniffer");
+	if (sbi->case_sensitive)
+		seq_puts(m, ",case_sensitive");
+	return 0;
+}
+
 const struct super_operations sharefs_sops = {
 	.put_super	= sharefs_put_super,
 	.statfs		= sharefs_statfs,
 	.evict_inode	= sharefs_evict_inode,
 	.alloc_inode	= sharefs_alloc_inode,
 	.destroy_inode	= sharefs_destroy_inode,
+	.show_options	= sharefs_show_options,
 };

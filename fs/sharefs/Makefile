@@ -10,3 +10,7 @@ all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
+
+# case-only rename
+# Interface-level verification switch (enabled only during verification period, kept commented after acceptance)
+# ccflags-y += -DSHAREFS_CASEFOLD_RENAME_EXPERIMENTAL

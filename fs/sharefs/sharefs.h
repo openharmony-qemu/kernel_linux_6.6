@@ -31,6 +31,32 @@
 /* the file system name */
 #define SHAREFS_NAME "sharefs"
 
+/*
+ * sharefs-internal lookup flag, outside the VFS LOOKUP_ namespace.
+ * lookup_one_qstr_excl() passes flags unchanged to ->lookup, so
+ * __sharefs_lookup uses this bit to recognize probes issued by casefold
+ * rename itself and skip the CI scan fallback (which would recurse).
+ */
+#define REVALIDATE_FOR_CASEFOLD_RENAME	0x1000
+
+/*
+ * Guard against future VFS LOOKUP_ flags claiming the borrowed bit
+ * 0x1000: fail at compile time instead of silently breaking the CI
+ * fallback.  When rebasing, add new namei.h flags to the mask below.
+ */
+#define SHAREFS_VFS_LOOKUP_MASK						\
+	(LOOKUP_FOLLOW | LOOKUP_DIRECTORY | LOOKUP_AUTOMOUNT |		\
+	 LOOKUP_REVAL | LOOKUP_RCU | LOOKUP_MOUNTPOINT |		\
+	 LOOKUP_OPEN | LOOKUP_CREATE | LOOKUP_EXCL |			\
+	 LOOKUP_RENAME_TARGET | LOOKUP_PARENT |				\
+	 LOOKUP_EMPTY | LOOKUP_DOWN |					\
+	 LOOKUP_NO_SYMLINKS | LOOKUP_NO_MAGICLINKS |			\
+	 LOOKUP_NO_XDEV | LOOKUP_BENEATH | LOOKUP_IN_ROOT |		\
+	 LOOKUP_CACHED)
+
+static_assert(!(REVALIDATE_FOR_CASEFOLD_RENAME & SHAREFS_VFS_LOOKUP_MASK),
+	      "sharefs private lookup bit collides with a VFS LOOKUP_ flag");
+
 /* sharefs root inode number */
 #define SHAREFS_ROOT_INO        1
 #define OID_ROOT             	0
@@ -82,6 +108,9 @@ struct sharefs_sb_info {
 	bool sniffer;
 	/* chmod control: u/g r/w bits forced to this mask ("reverse umask") */
 	unsigned int share_perm_mask;
+	/* casefold (ASCII-only case-insensitive) support */
+	bool case_sensitive;		/* mount option "case_sensitive" */
+	bool lower_sensitive;		/* probed from lower sb at fill_super */
 };
 
 /* operations vectors defined in specific files */
@@ -93,7 +122,8 @@ extern const struct inode_operations sharefs_dir_override_iops;
 extern const struct inode_operations sharefs_symlink_iops;
 extern const struct super_operations sharefs_sops;
 extern const struct dentry_operations sharefs_dops;
-
+extern const struct dentry_operations sharefs_ci_dops;
+extern const struct dentry_operations *sharefs_pick_dops(struct super_block *sb);
 extern int sharefs_init_inode_cache(void);
 extern void sharefs_destroy_inode_cache(void);
 extern int sharefs_init_dentry_cache(void);
@@ -113,6 +143,16 @@ extern int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 			   struct path *path);
 extern int sharefs_parse_options(struct sharefs_sb_info *sbi,
 				 const char *data);
+/* casefold helpers (lookup.c / inode.c) */
+extern bool sharefs_lower_is_case_sensitive(struct super_block *lower_sb);
+extern bool sharefs_name_needs_ci(const struct qstr *name);
+extern struct dentry *sharefs_lower_ci_lookup(struct super_block *sb,
+		struct inode *dir, const struct qstr *name,
+		struct dentry *lower_dir_dentry, struct vfsmount *lower_dir_mnt);
+extern int sharefs_casefold_rename(struct inode *old_dir,
+				   struct dentry *old_dentry,
+				   struct inode *new_dir,
+				   struct dentry *new_dentry);
 
 /*
  * inode to private data

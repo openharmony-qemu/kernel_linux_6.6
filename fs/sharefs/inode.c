@@ -9,6 +9,10 @@
  * Copyright (c) 2023 Huawei Device Co., Ltd.
  */
 
+#include <linux/fs.h>
+#include <linux/fileattr.h>
+#include <linux/fiemap.h>
+#include <linux/random.h>
 #include "sharefs.h"
 #include "authentication.h"
 
@@ -509,11 +513,128 @@ out_err:
 	return err;
 }
 
+/*
+ * forward FIEMAP to the lower inode.  ioctl_fiemap() has
+ * already run fiemap_prep() and set up the user extent buffer, so
+ * just pass fieinfo through unchanged.  tmpfs/vfat/exfat have no
+ * ->fiemap: report -EOPNOTSUPP instead of crashing.
+ */
+static int sharefs_fiemap(struct inode *inode,
+			  struct fiemap_extent_info *fieinfo,
+			  u64 start, u64 len)
+{
+	struct inode *lower_inode = sharefs_lower_inode(inode);
+	const struct cred *saved_cred;
+	int err;
+
+	if (!lower_inode || !lower_inode->i_op ||
+	    !lower_inode->i_op->fiemap)
+		return -EOPNOTSUPP;
+
+	saved_cred = sharefs_override_file_fsids(inode, NULL);
+	if (!saved_cred)
+		return -ENOMEM;
+
+	err = lower_inode->i_op->fiemap(lower_inode, fieinfo, start, len);
+	sharefs_revert_fsids(saved_cred);
+
+	return err;
+}
+
+/*
+ * lsattr support.  FS_IOC_GETFLAGS never reaches
+ * f_op->unlocked_ioctl (the VFS routes it through fileattr_get),
+ * so sharefs must provide this entry or lsattr fails with ENOTTY.
+ */
+static int sharefs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
+{
+	struct path lower_path;
+	const struct cred *saved_cred;
+	int err;
+
+	sharefs_get_lower_path(dentry, &lower_path);
+	if (!lower_path.dentry || !d_inode(lower_path.dentry) ||
+	    !d_inode(lower_path.dentry)->i_op ||
+	    !d_inode(lower_path.dentry)->i_op->fileattr_get) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+	saved_cred = sharefs_override_file_fsids(d_inode(dentry), NULL);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	err = vfs_fileattr_get(lower_path.dentry, fa);
+	sharefs_revert_fsids(saved_cred);
+
+	sharefs_info_ratelimited("fileattr_get, err %d", err);
+out:
+	sharefs_put_lower_path(dentry, &lower_path);
+	return err;
+}
+
+/*
+ * chattr support -- pass fileattr through to the lower fs,
+ * gated by the caller-ownership check below.
+ */
+static int sharefs_fileattr_set(struct mnt_idmap *idmap,
+				struct dentry *dentry, struct fileattr *fa)
+{
+	struct inode *lower_inode;
+	struct path lower_path;
+	const struct cred *saved_cred;
+	int err;
+
+	/*
+	 * Must run before the fsuid override below, which would let any
+	 * caller pass the lower fs's own ownership check.
+	 */
+	if (!inode_owner_or_capable(idmap, d_inode(dentry))) {
+		sharefs_err_ratelimited("fileattr_set denied, caller not owner");
+		return -EACCES;
+	}
+
+	sharefs_get_lower_path(dentry, &lower_path);
+	lower_inode = lower_path.dentry ? d_inode(lower_path.dentry) : NULL;
+	if (!lower_inode || !lower_inode->i_op ||
+	    !lower_inode->i_op->fileattr_set) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+	saved_cred = sharefs_override_file_fsids(d_inode(dentry), NULL);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	/*
+	 * Lower mount's idmap, not the upper one: the ownership check
+	 * in vfs_fileattr_set() is against the lower inode, which is
+	 * what overlayfs does too (ovl_real_fileattr_set()).  Degrades
+	 * to &nop_mnt_idmap when the lower mount is not idmapped.
+	 */
+	err = vfs_fileattr_set(mnt_idmap(lower_path.mnt), lower_path.dentry,
+			       fa);
+	sharefs_revert_fsids(saved_cred);
+	if (err)
+		goto out;
+
+	fsstack_copy_attr_all(d_inode(dentry), lower_inode);
+	sharefs_info_ratelimited("fileattr_set, err %d", err);
+out:
+	sharefs_put_lower_path(dentry, &lower_path);
+	return err;
+}
+
 const struct inode_operations sharefs_symlink_iops = {
 	.permission	= sharefs_permission,
 	.getattr	= sharefs_getattr,
 	.get_link	= sharefs_get_link,
 	.listxattr	= sharefs_listxattr,
+	.fiemap		= sharefs_fiemap,
 };
 
 const struct inode_operations sharefs_dir_iops = {
@@ -522,6 +643,8 @@ const struct inode_operations sharefs_dir_iops = {
 	.getattr	= sharefs_getattr,
 	.listxattr	= sharefs_listxattr,
 	.setattr	= sharefs_setattr,
+	.fileattr_get	= sharefs_fileattr_get,
+	.fileattr_set	= sharefs_fileattr_set,
 };
 
 const struct inode_operations sharefs_dir_override_iops = {
@@ -536,6 +659,8 @@ const struct inode_operations sharefs_dir_override_iops = {
 	.create		= sharefs_create,
 	.symlink	= sharefs_symlink,
 	.mkdir		= sharefs_mkdir,
+	.fileattr_get	= sharefs_fileattr_get,
+	.fileattr_set	= sharefs_fileattr_set,
 };
 
 const struct inode_operations sharefs_main_iops = {
@@ -543,4 +668,7 @@ const struct inode_operations sharefs_main_iops = {
 	.getattr	= sharefs_getattr,
 	.listxattr	= sharefs_listxattr,
 	.setattr        = sharefs_setattr,
+	.fiemap		= sharefs_fiemap,
+	.fileattr_get	= sharefs_fileattr_get,
+	.fileattr_set	= sharefs_fileattr_set,
 };

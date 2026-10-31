@@ -629,6 +629,8 @@
 				<filteritem type="filepath" name="drivers/misc/nexusland.c" desc="shield"/>
 				<filteritem type="filepath" name="tools/testing/selftests/sharefs/sharedfs_chmod_test.sh" desc="shield"/>
 				<filteritem type="filepath" name="tools/testing/selftests/sharefs/push_sharedfs_chmod_test.bat" desc="shield"/>
+				<filteritem type="filepath" name="tools/testing/selftests/sharefs/sharefs_casefold_test.sh" desc="shield"/>
+				<filteritem type="filepath" name="tools/testing/selftests/sharefs/sharefs_ioctl_test.sh" desc="shield"/>
             </filefilter>
         </filefilterlist>
     </oatconfig>

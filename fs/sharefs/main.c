@@ -81,6 +81,18 @@ static int sharefs_fill_super(struct super_block *sb, void *data, int silent)
 	atomic_inc(&lower_sb->s_active);
 	sharefs_set_lower_super(sb, lower_sb);
 
+	/*
+	 * probe the lower fs once at mount time.  Case-sensitive
+	 * lowers (f2fs, tmpfs) get the sharefs CI fallback; CI-native
+	 * ones (vfat, exfat, casefold ext4) handle it themselves.
+	 */
+	SHAREFS_SB(sb)->lower_sensitive =
+		sharefs_lower_is_case_sensitive(lower_sb);
+	pr_info("sharefs: lower %s case_sensitive=%d, sharefs ci=%d\n",
+		lower_sb->s_type->name, SHAREFS_SB(sb)->lower_sensitive,
+		!SHAREFS_SB(sb)->case_sensitive &&
+		SHAREFS_SB(sb)->lower_sensitive);
+
 	/* inherit maxbytes from lower file system */
 	sb->s_maxbytes = lower_sb->s_maxbytes;
 
@@ -111,7 +123,8 @@ static int sharefs_fill_super(struct super_block *sb, void *data, int silent)
 		err = -ENOMEM;
 		goto out_pput;
 	}
-	d_set_d_op(sb->s_root, &sharefs_dops);
+	/* set dentry operations for the root too */
+	d_set_d_op(sb->s_root, sharefs_pick_dops(sb));
 
 	/* link the upper and lower dentries */
 	sb->s_root->d_fsdata = NULL;

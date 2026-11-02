@@ -324,6 +324,297 @@ static int sharefs_check_lower_rename(struct super_block *old_sb, struct super_b
 
 	return 0;
 }
+
+/* case-only rename */
+
+/*
+ * lookup that guarantees the returned dentry carries the exact
+ * requested spelling.  On a CI lower a plain lookup may return a cached
+ * dentry whose name only CI-matches (a case variant); renaming onto it
+ * would write the variant spelling to disk.  Drop such a hit and retry
+ * so a fresh dentry with the exact spelling is used.
+ */
+static struct dentry *sharefs_ci_lookup_exact(const struct qstr *name,
+					      struct dentry *parent)
+{
+	struct dentry *d;
+
+	d = lookup_one_qstr_excl(name, parent,
+			LOOKUP_RENAME_TARGET | REVALIDATE_FOR_CASEFOLD_RENAME);
+	if (IS_ERR(d))
+		return d;
+	if (d->d_name.len == name->len &&
+	    !memcmp(d->d_name.name, name->name, name->len))
+		return d;
+	d_drop(d);
+	dput(d);
+	return lookup_one_qstr_excl(name, parent,
+			LOOKUP_RENAME_TARGET | REVALIDATE_FOR_CASEFOLD_RENAME);
+}
+
+/*
+ * two-step rename for CI-native lowers: old name -> temp name ->
+ * new name.  The lower fs treats "a.txt" and "A.TXT" as the same name,
+ * so a direct rename would be swallowed by its same-name check.  The
+ * caller holds the lower parent's exclusive lock, so
+ * lookup_one_qstr_excl() is safe here.
+ */
+static int sharefs_case_rename_two_step(struct inode *lower_dir,
+					struct dentry *lower_dir_dentry,
+					struct dentry *lower_old_dentry,
+					const struct qstr *orig_upper_name,
+					const struct qstr *new_name)
+{
+	struct dentry *tmp_dentry = NULL, *lower_new_dentry = NULL;
+	struct dentry *check_dentry = NULL, *lower_orig_dentry = NULL;
+	struct renamedata rd;
+	char tmp_name[64];
+	struct qstr tmp_qstr;
+	int err, rb_err;
+
+	/* random suffix so other processes cannot pre-create the temp name */
+	snprintf(tmp_name, sizeof(tmp_name), ".sharefs_ci_tmp_%lu_%08x",
+		 (unsigned long)jiffies, get_random_u32());
+	tmp_qstr = (struct qstr)QSTR_INIT(tmp_name, strlen(tmp_name));
+
+	/*
+	 * Rollback target name is the SHAREFS dentry name (caller-passed),
+	 * not the lower dentry name: with a CI lower the lower dentry can
+	 * be bound to a case-variant spelling during path lookup, and only
+	 * the upper name preserves the user-visible original spelling.
+	 */
+
+	/* skip the sharefs CI fallback to avoid recursion */
+	tmp_dentry = sharefs_ci_lookup_exact(&tmp_qstr, lower_dir_dentry);
+	if (IS_ERR(tmp_dentry)) {
+		err = PTR_ERR(tmp_dentry);
+		tmp_dentry = NULL;
+		goto out;
+	}
+
+	/* the temp name must be free: give up on collision */
+	if (!d_is_negative(tmp_dentry)) {
+		err = -EEXIST;
+		goto out;
+	}
+
+	/*
+	 * step 1: old name -> temp name.  d_move() moves the temp name
+	 * onto lower_old_dentry, so the inode keeps travelling with it;
+	 * tmp_dentry is negative afterwards and must not be used as a
+	 * rename source again.
+	 */
+	memset(&rd, 0, sizeof(rd));
+	rd.old_mnt_idmap = &nop_mnt_idmap;
+	rd.old_dir   = lower_dir;
+	rd.old_dentry = lower_old_dentry;
+	rd.new_mnt_idmap = &nop_mnt_idmap;
+	rd.new_dir   = lower_dir;
+	rd.new_dentry = tmp_dentry;
+	err = vfs_rename(&rd);
+	if (err)
+		goto out;
+
+	/* step 2: temp name (still on lower_old_dentry) -> new name */
+	lower_new_dentry = sharefs_ci_lookup_exact(new_name, lower_dir_dentry);
+	if (IS_ERR(lower_new_dentry)) {
+		err = PTR_ERR(lower_new_dentry);
+		lower_new_dentry = NULL;
+		goto rollback;
+	}
+
+	memset(&rd, 0, sizeof(rd));
+	rd.old_mnt_idmap = &nop_mnt_idmap;
+	rd.old_dir   = lower_dir;
+	rd.old_dentry = lower_old_dentry;
+	rd.new_mnt_idmap = &nop_mnt_idmap;
+	rd.new_dir   = lower_dir;
+	rd.new_dentry = lower_new_dentry;
+	err = vfs_rename(&rd);
+	if (err)
+		goto rollback;
+
+	/*
+	 * Post-check: the new name must resolve to the source inode.
+	 * Anything else means the steps misfired; undo to be safe.
+	 */
+	check_dentry = sharefs_ci_lookup_exact(new_name, lower_dir_dentry);
+	if (IS_ERR(check_dentry)) {
+		err = PTR_ERR(check_dentry);
+		check_dentry = NULL;
+		goto rollback;
+	}
+	if (d_is_negative(check_dentry) ||
+	    d_inode(check_dentry) != d_inode(lower_old_dentry)) {
+		sharefs_warning("case rename verify failed for '%s'",
+				new_name->name);
+		err = -EIO;
+		goto rollback;
+	}
+	goto out;
+
+rollback:
+	/*
+	 * Drop the new-name dentry first: on a CI lower its negative
+	 * dentry CI-matches the original name, so the lookup below
+	 * would hit it and the rollback would rename to the NEW
+	 * spelling instead of the original one.
+	 */
+	if (lower_new_dentry)
+		d_drop(lower_new_dentry);
+	/*
+	 * Best effort: move the file (still carried by lower_old_dentry)
+	 * back to the saved original name.  If this fails too the file
+	 * stays at the temp name; the failure is logged so it stays
+	 * visible.
+	 */
+	lower_orig_dentry = sharefs_ci_lookup_exact(orig_upper_name,
+			lower_dir_dentry);
+	if (IS_ERR(lower_orig_dentry)) {
+		rb_err = PTR_ERR(lower_orig_dentry);
+		lower_orig_dentry = NULL;
+	} else {
+		memset(&rd, 0, sizeof(rd));
+		rd.old_mnt_idmap = &nop_mnt_idmap;
+		rd.old_dir   = lower_dir;
+		rd.old_dentry = lower_old_dentry;
+		rd.new_mnt_idmap = &nop_mnt_idmap;
+		rd.new_dir   = lower_dir;
+		rd.new_dentry = lower_orig_dentry;
+		rb_err = vfs_rename(&rd);
+	}
+	if (rb_err) {
+		sharefs_warning("case rename rollback failed, file left at '%s', err %d",
+				tmp_name, rb_err);
+		/*
+		 * Rollback failed too: the file is stranded under the temp
+		 * name, so @err no longer describes the state (it claims
+		 * nothing moved).  Report -EIO instead.
+		 */
+		err = -EIO;
+	} else {
+		sharefs_info("case rename rollback ok, orig err %d", err);
+	}
+
+out:
+	dput(check_dentry);
+	dput(lower_orig_dentry);
+	dput(lower_new_dentry);
+	dput(tmp_dentry);
+	return err;
+}
+
+/*
+ * rename that changes only the case of a name.
+ *
+ * Returns 0 when handled (success or a true no-op), -EXDEV when this
+ * is not a case-only rename (different parent, different length, or
+ * no ASCII letters) and the standard rename path should be used, or
+ * another negative errno on real errors.
+ *
+ * Not wired into the default ->rename call chain: the VFS
+ * source==target shortcut (fs/namei.c) returns 0 before reaching
+ * ->rename, so making this effective end to end requires a VFS core
+ * change.  Interface-level testing builds with
+ * SHAREFS_CASEFOLD_RENAME_EXPERIMENTAL (see Makefile).
+ */
+int sharefs_casefold_rename(struct inode *old_dir, struct dentry *old_dentry,
+			    struct inode *new_dir, struct dentry *new_dentry)
+{
+	struct path lower_old_path;
+	struct dentry *lower_old_dentry, *lower_dir_dentry;
+	struct dentry *lower_probe;
+	struct inode *lower_dir;
+	struct renamedata rd;
+	const struct cred *saved_cred = NULL;
+	int err;
+
+	/* same-directory only */
+	if (old_dir != new_dir)
+		return -EXDEV;
+
+	/* true no-op: byte-identical names */
+	if (old_dentry->d_name.len == new_dentry->d_name.len &&
+	    !memcmp(old_dentry->d_name.name, new_dentry->d_name.name,
+		    old_dentry->d_name.len))
+		return 0;
+
+	/* different lengths or no letters: not case-only */
+	if (old_dentry->d_name.len != new_dentry->d_name.len)
+		return -EXDEV;
+	if (!sharefs_name_needs_ci(&new_dentry->d_name))
+		return -EXDEV;
+
+	sharefs_get_lower_path(old_dentry, &lower_old_path);
+	lower_old_dentry = lower_old_path.dentry;
+	lower_dir_dentry = dget_parent(lower_old_dentry);
+	lower_dir = d_inode(lower_dir_dentry);
+
+	/*
+	 * The upper new_dentry is deliberately negative, so look the
+	 * new name up in the lower fs ourselves; the caller already
+	 * holds the parent locks (we sit between lock_rename() and
+	 * vfs_rename()).
+	 */
+	lower_probe = lookup_one_qstr_excl(&new_dentry->d_name, lower_dir_dentry,
+			LOOKUP_RENAME_TARGET | REVALIDATE_FOR_CASEFOLD_RENAME);
+	if (IS_ERR(lower_probe)) {
+		err = PTR_ERR(lower_probe);
+		goto out;
+	}
+
+	saved_cred = sharefs_override_file_fsids(old_dir, NULL);
+	if (!saved_cred) {
+		err = -ENOMEM;
+		goto out_put_probe;
+	}
+
+	if (d_is_negative(lower_probe)) {
+		/* case-sensitive lower: one plain vfs_rename */
+		memset(&rd, 0, sizeof(rd));
+		rd.old_mnt_idmap = &nop_mnt_idmap;
+		rd.old_dir   = lower_dir;
+		rd.old_dentry = lower_old_dentry;
+		rd.new_mnt_idmap = &nop_mnt_idmap;
+		rd.new_dir   = lower_dir;
+		rd.new_dentry = lower_probe;
+		err = vfs_rename(&rd);
+		sharefs_info("casefold rename (direct), err %d", err);
+	} else if (d_inode(lower_probe) == d_inode(lower_old_dentry)) {
+		/* CI-native lower: new name hits the source inode, two steps */
+		err = sharefs_case_rename_two_step(lower_dir, lower_dir_dentry,
+						   lower_old_dentry,
+						   &old_dentry->d_name,
+						   &new_dentry->d_name);
+		sharefs_info("casefold rename (two-step), err %d", err);
+	} else {
+		/* another inode already owns a case variant of the new name */
+		err = -EEXIST;
+		sharefs_warning("casefold rename target exists, err -EEXIST");
+	}
+
+	if (err)
+		goto out_revert;
+
+	/*
+	 * Leave the upper dentry cache alone: sharefs_rename()'s
+	 * vfs_rename() d_move()s it, and manual d_drop here would leave
+	 * stale negatives below.  Revalidation is covered by
+	 * sharefs_d_revalidate() returning 0.
+	 */
+	fsstack_copy_attr_all(new_dir, lower_dir);
+	fsstack_copy_inode_size(new_dir, lower_dir);
+
+out_revert:
+	sharefs_revert_fsids(saved_cred);
+out_put_probe:
+	dput(lower_probe);
+out:
+	dput(lower_dir_dentry);
+	sharefs_put_lower_path(old_dentry, &lower_old_path);
+	return err;
+}
+
 static int sharefs_rename(struct mnt_idmap *idmap, struct inode *old_dir, struct dentry *old_dentry,
 				struct inode *new_dir, struct dentry *new_dentry,
 				unsigned int flags)
@@ -365,6 +656,17 @@ static int sharefs_rename(struct mnt_idmap *idmap, struct inode *old_dir, struct
 		err = -ENOTEMPTY;
 		goto out;
 	}
+
+#ifdef SHAREFS_CASEFOLD_RENAME_EXPERIMENTAL
+	/* test-only hook; keep it undefined in production builds */
+	if (old_dir == new_dir &&
+	    !SHAREFS_SB(old_dir->i_sb)->case_sensitive) {
+		err = sharefs_casefold_rename(old_dir, old_dentry, new_dir,
+					      new_dentry);
+		if (err != -EXDEV)
+			goto out;
+	}
+#endif
 
 	rename_data.old_mnt_idmap  = &nop_mnt_idmap;
 	rename_data.old_dir = lower_old_dir_dentry->d_inode;

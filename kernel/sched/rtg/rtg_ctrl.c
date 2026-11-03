@@ -632,7 +632,7 @@ static int parse_add_rtg_thread(const struct rtg_grp_data *rs_data)
 	}
 	mutex_lock(&frame_info->lock);
 	add_num = rs_data->tid_num;
-	if ((frame_info->thread_num < 0) || (add_num < 0)) {
+	if ((frame_info->thread_num < 0) || (add_num < 0) || (add_num > MAX_TID_NUM)) {
 		mutex_unlock(&frame_info->lock);
 		pr_err("[SCHED_RTG] Unexception err: frame_info num < 0.\n");
 		return -INVALID_RTG_ID;

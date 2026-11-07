@@ -800,6 +800,8 @@ enum {
 	FI_ATOMIC_DIRTIED,	/* indicate atomic file is dirtied */
 	FI_ATOMIC_REPLACE,	/* indicate atomic replace */
 	FI_OPENED_FILE,		/* indicate file has been opened */
+	FI_MONITORED,		/* in-memory monitoring, inherited by children */
+	FI_MONITOR_ROOT,		/* an explicitly monitored directory */
 	FI_MAX,			/* max flag, never be used */
 };
 
@@ -1547,6 +1549,7 @@ struct decompress_io_ctx {
 #define MAX_COMPRESS_WINDOW_SIZE(log_size)	((PAGE_SIZE) << (log_size))
 
 struct f2fs_sb_info {
+	struct f2fs_monitor *monitor;
 	struct super_block *sb;			/* pointer to VFS super block */
 	struct proc_dir_entry *s_proc;		/* proc entry */
 	struct f2fs_super_block *raw_super;	/* raw super block pointer */

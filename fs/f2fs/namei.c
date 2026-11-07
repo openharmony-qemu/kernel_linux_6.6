@@ -20,6 +20,7 @@
 #include "segment.h"
 #include "xattr.h"
 #include "acl.h"
+#include "monitor.h"
 #include <trace/events/f2fs.h>
 
 static inline bool is_extension_exist(const unsigned char *s, const char *sub,
@@ -321,6 +322,7 @@ static struct inode *f2fs_new_inode(struct mnt_idmap *idmap,
 	stat_inc_inline_inode(inode);
 	stat_inc_inline_dir(inode);
 
+	f2fs_monitor_inherit(dir, inode);
 	f2fs_set_inode_flags(inode);
 
 	f2fs_init_extent_tree(inode);
@@ -381,6 +383,7 @@ static int f2fs_create(struct mnt_idmap *idmap, struct inode *dir,
 
 	f2fs_alloc_nid_done(sbi, ino);
 
+	f2fs_monitor_create(dentry, inode);
 	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
@@ -499,6 +502,7 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 		err = PTR_ERR(inode);
 		goto out;
 	}
+	f2fs_monitor_inherit(dir, inode);
 
 	if (IS_ENCRYPTED(dir) &&
 	    (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode)) &&
@@ -540,6 +544,11 @@ static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
 	int err;
 
 	trace_f2fs_unlink_enter(dir, dentry);
+
+	if (is_inode_flag_set(inode, FI_MONITOR_ROOT)) {
+		err = -EBUSY;
+		goto fail;
+	}
 
 	if (unlikely(f2fs_cp_error(sbi))) {
 		err = -EIO;
@@ -593,6 +602,8 @@ static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
 #endif
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
+	f2fs_monitor_event(dentry, S_ISDIR(inode->i_mode) ?
+			   F2FS_D_DELETE : F2FS_F_DELETE, false);
 fail:
 	trace_f2fs_unlink_exit(inode, err);
 	return err;
@@ -725,6 +736,7 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 
 	f2fs_alloc_nid_done(sbi, inode->i_ino);
 
+	f2fs_monitor_create(dentry, inode);
 	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
@@ -743,6 +755,8 @@ static int f2fs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 
+	if (is_inode_flag_set(inode, FI_MONITOR_ROOT))
+		return -EBUSY;
 	if (f2fs_empty_dir(inode))
 		return f2fs_unlink(dir, dentry);
 	return -ENOTEMPTY;
@@ -1322,6 +1336,28 @@ const struct inode_operations f2fs_encrypted_symlink_inode_operations = {
 	.listxattr	= f2fs_listxattr,
 };
 
+static int monitor_rename(struct mnt_idmap *idmap,
+		struct inode *old_dir, struct dentry *old_dentry,
+		struct inode *new_dir, struct dentry *new_dentry, unsigned int flags)
+{
+	struct f2fs_monitor_rename *rename;
+	int err;
+
+	/* A monitored rename keeps its lock until finish, after d_move(). */
+	err = f2fs_monitor_prepare_rename(old_dentry, new_dentry, flags, &rename);
+	if (!err)
+		err = f2fs_rename2(idmap, old_dir, old_dentry, new_dir, new_dentry, flags);
+	/* Publish the new names before another hook can construct a log path. */
+	if (!err) {
+		if (flags & RENAME_EXCHANGE)
+			d_exchange(old_dentry, new_dentry);
+		else
+			d_move(old_dentry, new_dentry);
+	}
+	f2fs_monitor_finish_rename(rename, err);
+	return err;
+}
+
 const struct inode_operations f2fs_dir_inode_operations = {
 	.create		= f2fs_create,
 	.lookup		= f2fs_lookup,
@@ -1331,7 +1367,7 @@ const struct inode_operations f2fs_dir_inode_operations = {
 	.mkdir		= f2fs_mkdir,
 	.rmdir		= f2fs_rmdir,
 	.mknod		= f2fs_mknod,
-	.rename		= f2fs_rename2,
+	.rename		= monitor_rename,
 	.tmpfile	= f2fs_tmpfile,
 	.getattr	= f2fs_getattr,
 	.setattr	= f2fs_setattr,

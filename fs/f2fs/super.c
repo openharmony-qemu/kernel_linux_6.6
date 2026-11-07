@@ -30,6 +30,7 @@
 #include <linux/lz4.h>
 
 #include "f2fs.h"
+#include "monitor.h"
 #include "node.h"
 #include "segment.h"
 #include "xattr.h"
@@ -4373,6 +4374,10 @@ try_onemore:
 
 	sbi->sb = sb;
 
+	err = f2fs_monitor_init(sbi);
+	if (err)
+		goto free_sbi;
+
 	/* initialize locks within allocated memory */
 	init_f2fs_rwsem(&sbi->gc_lock);
 	mutex_init(&sbi->writepages);
@@ -4840,6 +4845,7 @@ free_options:
 free_sb_buf:
 	kfree(raw_super);
 free_sbi:
+	f2fs_monitor_destroy(sbi);
 	if (sbi->s_chksum_driver)
 		crypto_free_shash(sbi->s_chksum_driver);
 	kfree(sbi);
@@ -4864,6 +4870,7 @@ static void kill_f2fs_super(struct super_block *sb)
 	if (sb->s_root) {
 		struct f2fs_sb_info *sbi = F2FS_SB(sb);
 
+		f2fs_monitor_destroy(sbi);
 		set_sbi_flag(sbi, SBI_IS_CLOSE);
 		f2fs_stop_gc_thread(sbi);
 		f2fs_stop_discard_thread(sbi);
@@ -4897,7 +4904,7 @@ static struct file_system_type f2fs_fs_type = {
 	.name		= "f2fs",
 	.mount		= f2fs_mount,
 	.kill_sb	= kill_f2fs_super,
-	.fs_flags	= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
+	.fs_flags	= FS_REQUIRES_DEV | FS_ALLOW_IDMAP | FS_RENAME_DOES_D_MOVE,
 };
 MODULE_ALIAS_FS("f2fs");
 

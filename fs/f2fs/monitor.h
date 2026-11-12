@@ -4,8 +4,15 @@
 
 #include <linux/fs.h>
 
+/*
+ * For files using f2fs_file_operations, file->private_data is reserved for
+ * monitoring: NULL or an owned struct monitor_config reference for pending
+ * content changes. f2fs_monitor_close() clears it and drops the reference.
+ * Other features/backports must coordinate ownership, e.g. through a shared
+ * per-file context, rather than overwrite this field independently.
+ */
+
 struct f2fs_sb_info;
-struct f2fs_monitor_rename;
 
 enum f2fs_event_type {
 	F2FS_F_CREATE,
@@ -38,7 +45,7 @@ int f2fs_monitor_set(struct file *file, unsigned long arg);
 int f2fs_monitor_get(struct file *file, unsigned long arg);
 int f2fs_monitor_get_error(struct file *file, unsigned long arg);
 int f2fs_monitor_prepare_rename(struct dentry *old, struct dentry *new,
-		unsigned int flags, struct f2fs_monitor_rename **result);
-void f2fs_monitor_finish_rename(struct f2fs_monitor_rename *rename, int err);
+		unsigned int flags, void **result);
+void f2fs_monitor_finish_rename(void *context, int err);
 
 #endif

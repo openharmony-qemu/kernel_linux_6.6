@@ -500,6 +500,9 @@ As of kernel 2.6.22, the following members are defined:
 		int (*mknod) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
 		int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
 			       struct inode *, struct dentry *, unsigned int);
+		int (*rename_prepare)(struct dentry *, struct dentry *,
+				      unsigned int, void **);
+		void (*rename_finish)(void *, int);
 		int (*readlink) (struct dentry *, char __user *,int);
 		const char *(*get_link) (struct dentry *, struct inode *,
 					 struct delayed_call *);
@@ -589,6 +592,26 @@ otherwise noted.
 	(2) RENAME_EXCHANGE: exchange source and target.  Both must
 	exist; this is checked by the VFS.  Unlike plain rename, source
 	and target may be of different type.
+
+``rename_prepare``
+	optional preparation called by vfs_rename() after its permission,
+	delegation and locking checks, immediately before ->rename().  It
+	receives the source and destination dentries, flags and an initially
+	NULL filesystem context pointer.  It may store a private context for
+	->rename_finish().  If it fails, ->rename() and ->rename_finish() are
+	not called, so it must release any resources it acquired.  A method
+	that retains resources on success must also provide ->rename_finish().
+
+``rename_finish``
+	optional completion called once after ->rename() returns.  On success,
+	it runs after dcache updates; on failure, the VFS leaves the dentries
+	unmoved.  It receives the private context (NULL if none was supplied)
+	and the ->rename() result.  It runs before the VFS releases the rename
+	inode locks and dentry references, and may block, but cannot change
+	the rename result.  This allows a filesystem to complete private
+	bookkeeping after the VFS has published the new names without taking
+	over d_move()/d_exchange().  Neither hook is called when VFS checks
+	fail before preparation, or when source and target are the same inode.
 
 ``get_link``
 	called by the VFS to follow a symbolic link to the inode it

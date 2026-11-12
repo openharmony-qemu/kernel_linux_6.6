@@ -9,12 +9,19 @@
 #include "monitor.h"
 
 #define MONITOR_LOG_DIR "/data/log"
+#define MONITOR_LOG_NAME_LEN 32
 #define MONITOR_QUEUE_LIMIT (4 * 1024 * 1024)
 
+/*
+ * A config pins root until its last put. sbi is borrowed: filesystem teardown
+ * drains monitor work and releases configs before freeing sbi.
+ */
 struct monitor_config {
 	struct hlist_node node;
 	refcount_t refs;
+	struct f2fs_sb_info *sbi;
 	struct inode *root;
+	unsigned long root_ino;
 	const struct cred *cred;
 	int error;
 };
@@ -28,7 +35,7 @@ struct monitor_record {
 };
 
 struct f2fs_monitor {
-	/* Protect roots and order monitored records against rename/d_move(). */
+	/* Protect roots and serialize records through VFS rename completion. */
 	struct rw_semaphore sem;
 	struct mutex config_lock;
 	DECLARE_HASHTABLE(roots, 8);
@@ -36,6 +43,10 @@ struct f2fs_monitor {
 	struct list_head pending;
 	size_t queued_bytes;
 	struct work_struct work;
+	/*
+	 * Synchronous log-I/O recursion guard, not an async I/O origin marker.
+	 * Writeback/compression completion paths do not emit monitor events.
+	 */
 	struct task_struct *writer;
 };
 
@@ -65,12 +76,18 @@ static void monitor_put(struct monitor_config *config)
 	}
 }
 
+/*
+ * Latch the first failure: even a transient error can leave missing or partial
+ * records. Clearing error cannot repair the journal. Recovery requires a new
+ * backup baseline and disabling/re-enabling monitoring on a quiescent subtree.
+ * Caller holds a config reference or protects the table's reference.
+ */
 static void monitor_error(struct monitor_config *config, int err)
 {
 	if (err && !cmpxchg(&config->error, 0, err))
-		f2fs_err(F2FS_I_SB(config->root),
+		f2fs_err(config->sbi,
 			 "monitor %lu: log incomplete (error %d); a new backup is required",
-			 config->root->i_ino, err);
+			 config->root_ino, err);
 }
 
 /* Table updates hold config_lock and sem; lookups require either lock. */
@@ -80,7 +97,7 @@ static struct monitor_config *monitor_lookup(struct f2fs_sb_info *sbi,
 	struct monitor_config *config;
 
 	hash_for_each_possible(sbi->monitor->roots, config, node, ino)
-		if (config->root->i_ino == ino)
+		if (config->root_ino == ino)
 			return config;
 	return NULL;
 }
@@ -120,7 +137,10 @@ static struct monitor_config *monitor_find_root(struct dentry *entry)
 	return config;
 }
 
-/* Caller holds rename_lock across both paths of a rename record. */
+/*
+ * Build backwards; the returned length identifies the suffix at buffer's end.
+ * Caller holds rename_lock across both paths of a rename record.
+ */
 static int monitor_path(struct dentry *entry, struct monitor_config *config,
 			char *buffer, size_t size)
 {
@@ -148,8 +168,6 @@ static int monitor_path(struct dentry *entry, struct monitor_config *config,
 		memcpy(pos, entry->d_name.name, len);
 		entry = entry->d_parent;
 	}
-	if (err >= 0)
-		memmove(buffer, pos, err);
 	return err;
 }
 
@@ -201,9 +219,9 @@ retry:
 	log->metadata_only = metadata_only;
 	log->path_len = len;
 	log->old_path_len = old_len;
-	memcpy(log->data, buffer, len);
+	memcpy(log->data, buffer + size - len, len);
 	if (old)
-		memcpy(log->data + len, buffer + size, old_len);
+		memcpy(log->data + len, buffer + 2 * size - old_len, old_len);
 out:
 	kvfree(buffer);
 	return record;
@@ -222,7 +240,13 @@ static void monitor_queue(struct monitor_record *record)
 
 	if (!record)
 		return;
-	monitor = F2FS_I_SB(record->config->root)->monitor;
+	monitor = record->config->sbi->monitor;
+	/*
+	 * Cancellation holds config_lock until flush_work() completes, so at
+	 * most one removal record can be pending or running per filesystem.
+	 * Let it bypass the limit so a full queue cannot prevent log cleanup;
+	 * its header is still charged to queued_bytes below (size is zero).
+	 */
 	spin_lock(&monitor->queue_lock);
 	full = !record->remove && monitor->queued_bytes + sizeof(*record) +
 			record->size > MONITOR_QUEUE_LIMIT;
@@ -279,7 +303,7 @@ void f2fs_monitor_create(struct dentry *dentry, struct inode *inode)
 	up_read(&monitor->sem);
 }
 
-/* private_data is unused by F2FS. A config reference means this file is dirty. */
+/* A config reference in file->private_data marks pending content changes. */
 void f2fs_monitor_written(struct file *file)
 {
 	struct inode *inode = file_inode(file);
@@ -330,14 +354,14 @@ out:
 static void monitor_log_name(struct monitor_config *config, char *name,
 			     size_t size)
 {
-	snprintf(name, size, "%lu.log", config->root->i_ino);
+	snprintf(name, size, "%lu.log", config->root_ino);
 }
 
 static struct file *monitor_open_log(struct monitor_config *config, bool *created)
 {
 	struct path parent;
 	struct file *file;
-	char name[64];
+	char name[MONITOR_LOG_NAME_LEN];
 	int err;
 
 	err = kern_path(MONITOR_LOG_DIR, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &parent);
@@ -364,6 +388,7 @@ static struct file *monitor_open_log(struct monitor_config *config, bool *create
 	if (IS_ERR(file))
 		return file;
 	if (!S_ISREG(file_inode(file)->i_mode) ||
+	    file_inode(file)->i_nlink != 1 ||
 	    !uid_eq(file_inode(file)->i_uid, GLOBAL_ROOT_UID) ||
 	    (file_inode(file)->i_sb->s_magic == F2FS_SUPER_MAGIC &&
 	     is_inode_flag_set(file_inode(file), FI_MONITORED))) {
@@ -378,7 +403,7 @@ static int monitor_remove_log(struct monitor_config *config)
 	struct path parent;
 	struct dentry *entry;
 	struct inode *inode = NULL;
-	char name[32];
+	char name[MONITOR_LOG_NAME_LEN];
 	int err;
 
 	err = kern_path(MONITOR_LOG_DIR, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &parent);
@@ -629,6 +654,10 @@ int f2fs_monitor_set(struct file *file, unsigned long arg)
 	if (!S_ISDIR(inode->i_mode))
 		return -EINVAL;
 	mutex_lock(&monitor->config_lock);
+	if (unlikely(f2fs_cp_error(sbi))) {
+		err = -EIO;
+		goto out_mutex;
+	}
 	/* Userspace must stop operations on this subtree until the ioctl returns. */
 	if (arg) {
 		config = kzalloc(sizeof(*config), GFP_KERNEL);
@@ -638,7 +667,9 @@ int f2fs_monitor_set(struct file *file, unsigned long arg)
 		}
 		refcount_set(&config->refs, 1);
 		ihold(inode);
+		config->sbi = sbi;
 		config->root = inode;
+		config->root_ino = inode->i_ino;
 		config->cred = get_current_cred();
 		log = monitor_open_log(config, &created);
 		if (IS_ERR(log)) {
@@ -715,7 +746,10 @@ out_put:
 		monitor_put(config);
 	kfree(remove);
 	if (cancelled) {
-		/* Wait without sem or VFS locks; config_lock excludes re-enabling. */
+		/*
+		 * Hold config_lock until removal completes to bound removal records
+		 * to one and exclude re-enabling. No sem or VFS locks are held here.
+		 */
 		flush_work(&monitor->work);
 		err = READ_ONCE(cancelled->error);
 		monitor_put(cancelled);
@@ -737,6 +771,7 @@ int f2fs_monitor_get(struct file *file, unsigned long arg)
 	return put_user(enabled, (u8 __user *)arg);
 }
 
+/* Report the latched error without clearing it; repeated SET cannot reset it. */
 int f2fs_monitor_get_error(struct file *file, unsigned long arg)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(file_inode(file));
@@ -751,8 +786,9 @@ int f2fs_monitor_get_error(struct file *file, unsigned long arg)
 	return put_user(err, (s32 __user *)arg);
 }
 
+/* VFS calls finish after ->rename() and, on success, its dcache update. */
 int f2fs_monitor_prepare_rename(struct dentry *old, struct dentry *new,
-		unsigned int flags, struct f2fs_monitor_rename **result)
+		unsigned int flags, void **result)
 {
 	struct inode *inode = d_inode(old), *victim = d_inode(new);
 	struct f2fs_monitor *monitor = F2FS_I_SB(inode)->monitor;
@@ -833,8 +869,9 @@ out_unlock:
 	return err;
 }
 
-void f2fs_monitor_finish_rename(struct f2fs_monitor_rename *rename, int err)
+void f2fs_monitor_finish_rename(void *context, int err)
 {
+	struct f2fs_monitor_rename *rename = context;
 	struct monitor_record *record, *next;
 
 	if (!rename)

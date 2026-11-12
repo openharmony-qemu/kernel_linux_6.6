@@ -4538,7 +4538,6 @@ static long __f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 long f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	/* Configuration and error reporting must also work after ENOSPC/EIO. */
 	switch (cmd) {
 	case F2FS_IOC_SET_MONITOR:
 		return f2fs_monitor_set(filp, arg);
@@ -5033,14 +5032,18 @@ static ssize_t f2fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (ret <= 0)
 		goto out_unlock;
 
-	if ((iocb->ki_flags & IOCB_NOWAIT) &&
+	/* Determine whether we will do a direct write or a buffered write. */
+	dio = f2fs_should_use_dio(inode, iocb, from);
+
+	/*
+	 * Monitored DIO must complete before updating monitor state.
+	 * NOWAIT callers must retry without NOWAIT to allow that wait.
+	 */
+	if (dio && (iocb->ki_flags & IOCB_NOWAIT) &&
 	    is_inode_flag_set(inode, FI_MONITORED)) {
 		ret = -EAGAIN;
 		goto out_unlock;
 	}
-
-	/* Determine whether we will do a direct write or a buffered write. */
-	dio = f2fs_should_use_dio(inode, iocb, from);
 
 	/* Possibly preallocate the blocks for the write. */
 	target_size = iocb->ki_pos + iov_iter_count(from);
@@ -5253,6 +5256,7 @@ long f2fs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 }
 #endif
 
+/* file->private_data is reserved by monitoring; see monitor.h. */
 const struct file_operations f2fs_file_operations = {
 	.llseek		= f2fs_llseek,
 	.read_iter	= f2fs_file_read_iter,

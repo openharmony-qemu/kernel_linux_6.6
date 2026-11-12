@@ -1984,6 +1984,10 @@ struct inode_operations {
 		      umode_t,dev_t);
 	int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
 			struct inode *, struct dentry *, unsigned int);
+	/* Optional hooks bracketing ->rename() and the VFS dcache update. */
+	int (*rename_prepare)(struct dentry *, struct dentry *, unsigned int,
+			      void **);
+	void (*rename_finish)(void *, int);
 	int (*setattr) (struct mnt_idmap *, struct dentry *, struct iattr *);
 	int (*getattr) (struct mnt_idmap *, const struct path *,
 			struct kstat *, u32, unsigned int);

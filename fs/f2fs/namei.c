@@ -1336,28 +1336,6 @@ const struct inode_operations f2fs_encrypted_symlink_inode_operations = {
 	.listxattr	= f2fs_listxattr,
 };
 
-static int monitor_rename(struct mnt_idmap *idmap,
-		struct inode *old_dir, struct dentry *old_dentry,
-		struct inode *new_dir, struct dentry *new_dentry, unsigned int flags)
-{
-	struct f2fs_monitor_rename *rename;
-	int err;
-
-	/* A monitored rename keeps its lock until finish, after d_move(). */
-	err = f2fs_monitor_prepare_rename(old_dentry, new_dentry, flags, &rename);
-	if (!err)
-		err = f2fs_rename2(idmap, old_dir, old_dentry, new_dir, new_dentry, flags);
-	/* Publish the new names before another hook can construct a log path. */
-	if (!err) {
-		if (flags & RENAME_EXCHANGE)
-			d_exchange(old_dentry, new_dentry);
-		else
-			d_move(old_dentry, new_dentry);
-	}
-	f2fs_monitor_finish_rename(rename, err);
-	return err;
-}
-
 const struct inode_operations f2fs_dir_inode_operations = {
 	.create		= f2fs_create,
 	.lookup		= f2fs_lookup,
@@ -1367,7 +1345,9 @@ const struct inode_operations f2fs_dir_inode_operations = {
 	.mkdir		= f2fs_mkdir,
 	.rmdir		= f2fs_rmdir,
 	.mknod		= f2fs_mknod,
-	.rename		= monitor_rename,
+	.rename		= f2fs_rename2,
+	.rename_prepare	= f2fs_monitor_prepare_rename,
+	.rename_finish	= f2fs_monitor_finish_rename,
 	.tmpfile	= f2fs_tmpfile,
 	.getattr	= f2fs_getattr,
 	.setattr	= f2fs_setattr,

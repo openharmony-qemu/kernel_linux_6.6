@@ -4763,6 +4763,7 @@ int vfs_rename(struct renamedata *rd)
 	unsigned max_links = new_dir->i_sb->s_max_links;
 	struct name_snapshot old_name;
 	bool lock_old_subdir, lock_new_subdir;
+	void *rename_context = NULL;
 
 	if (source == target)
 		return 0;
@@ -4869,10 +4870,16 @@ int vfs_rename(struct renamedata *rd)
 		if (error)
 			goto out;
 	}
+	if (old_dir->i_op->rename_prepare) {
+		error = old_dir->i_op->rename_prepare(old_dentry, new_dentry,
+						      flags, &rename_context);
+		if (error)
+			goto out;
+	}
 	error = old_dir->i_op->rename(rd->new_mnt_idmap, old_dir, old_dentry,
 				      new_dir, new_dentry, flags);
 	if (error)
-		goto out;
+		goto out_finish;
 
 	if (!(flags & RENAME_EXCHANGE) && target) {
 		if (is_dir) {
@@ -4888,6 +4895,9 @@ int vfs_rename(struct renamedata *rd)
 		else
 			d_exchange(old_dentry, new_dentry);
 	}
+out_finish:
+	if (old_dir->i_op->rename_finish)
+		old_dir->i_op->rename_finish(rename_context, error);
 out:
 	if (!is_dir || lock_old_subdir)
 		inode_unlock(source);

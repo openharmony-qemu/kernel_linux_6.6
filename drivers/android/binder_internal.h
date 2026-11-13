@@ -539,6 +539,10 @@ struct binder_transaction {
 	long    priority;
 	long    saved_priority;
 	kuid_t  sender_euid;
+#ifdef CONFIG_BINDER_SENDER_INFO
+	/* Private reference for one-way sender info, not the wire PID. */
+	struct pid *async_sender_pid;
+#endif
 	ktime_t start_time;
 	struct list_head fd_fixups;
 	binder_uintptr_t security_ctx;

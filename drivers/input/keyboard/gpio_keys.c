@@ -777,6 +777,17 @@ gpio_keys_get_devtree_pdata(struct device *dev)
 			/* legacy name */
 			fwnode_property_read_bool(child, "gpio-key,wakeup");
 
+		/*
+		 * QEMU virt supplies a real GPIO power key, but its generated
+		 * DT omits wakeup-source. Keep the regular gpio-keys IRQ wake
+		 * path; do not turn unrelated keys or physical boards into
+		 * wake sources, nor synthesize periodic wakeup events.
+		 */
+		if (is_of_node(child) && of_machine_is_compatible("linux,dummy-virt") &&
+		    of_node_name_eq(to_of_node(child), "poweroff") &&
+		    button->type == EV_KEY && button->code == KEY_POWER)
+			button->wakeup = true;
+
 		fwnode_property_read_u32(child, "wakeup-event-action",
 					 &button->wakeup_event_action);
 

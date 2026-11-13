@@ -50,6 +50,7 @@ struct virtio_pci_device {
 		struct virtio_pci_modern_device mdev;
 	};
 	bool is_legacy;
+	bool qemu_gpu_s2idle;
 
 	/* Where to read and clear interrupt */
 	u8 __iomem *isr;

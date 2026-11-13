@@ -132,6 +132,8 @@
 	DEF_PAGEFLAG_NAME(swapbacked),					\
 	DEF_PAGEFLAG_NAME(unevictable)					\
 IF_HAVE_PG_PURGEABLE(purgeable)						\
+IF_HAVE_PG_XPM_INTEGRITY(xpm_readonly)					\
+IF_HAVE_PG_XPM_INTEGRITY(xpm_writetainted)				\
 IF_HAVE_PG_MLOCK(mlocked)						\
 IF_HAVE_PG_UNCACHED(uncached)						\
 IF_HAVE_PG_HWPOISON(hwpoison)						\

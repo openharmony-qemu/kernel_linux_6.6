@@ -115,7 +115,7 @@ MODULE_PARM_DESC(multiplanar, " 1 (default) creates a single planar device, 2 cr
  * vbi-out + vid-out + meta-cap
  */
 static unsigned int node_types[VIVID_MAX_DEVS] = {
-	[0 ... (VIVID_MAX_DEVS - 1)] = 0xe1d3d
+	[0 ... (VIVID_MAX_DEVS - 1)] = 0x1
 };
 module_param_array(node_types, uint, NULL, 0444);
 MODULE_PARM_DESC(node_types, " node types, default is 0xe1d3d. Bitmask with the following meaning:\n"
@@ -132,7 +132,7 @@ MODULE_PARM_DESC(node_types, " node types, default is 0xe1d3d. Bitmask with the 
 			     "\t\t    bit 19: Touch Capture node\n");
 
 /* Default: 4 inputs */
-static unsigned num_inputs[VIVID_MAX_DEVS] = { [0 ... (VIVID_MAX_DEVS - 1)] = 4 };
+static unsigned num_inputs[VIVID_MAX_DEVS] = { [0 ... (VIVID_MAX_DEVS - 1)] = 1 };
 module_param_array(num_inputs, uint, NULL, 0444);
 MODULE_PARM_DESC(num_inputs, " number of inputs, default is 4");
 

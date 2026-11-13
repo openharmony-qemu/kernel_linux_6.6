@@ -1670,6 +1670,7 @@ struct task_struct {
 #ifdef CONFIG_ACCESS_TOKENID
 	u64				token;
 	u64				ftoken;
+	u32				user_id;
 #endif
 
 	/*

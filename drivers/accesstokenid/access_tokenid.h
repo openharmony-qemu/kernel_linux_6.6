@@ -24,6 +24,9 @@ enum {
 	REMOVE_PERMISSIONS,
 	GET_PERMISSION,
 	SET_PERMISSION,
+	GET_ALL_PERMISSIONS = 11,
+	SET_USERID,
+	GET_USERID,
 	ACCESS_TOKENID_MAX_NR
 };
 
@@ -47,6 +50,11 @@ typedef struct {
 	uint32_t perm[MAX_PERM_GROUP_NUM];
 } ioctl_add_perm_data;
 
+typedef struct {
+	uint32_t token;
+	uint32_t perm[MAX_PERM_GROUP_NUM];
+} ioctl_get_all_perm_data;
+
 struct token_perm_node {
 	ioctl_add_perm_data perm_data;
 	struct token_perm_node *left;
@@ -69,5 +77,11 @@ struct token_perm_node {
 	_IOW(ACCESS_TOKEN_ID_IOCTL_BASE, GET_PERMISSION, ioctl_set_get_perm_data)
 #define	ACCESS_TOKENID_SET_PERMISSION \
 	_IOW(ACCESS_TOKEN_ID_IOCTL_BASE, SET_PERMISSION, ioctl_set_get_perm_data)
+#define	ACCESS_TOKENID_GET_ALL_PERMISSIONS \
+	_IOW(ACCESS_TOKEN_ID_IOCTL_BASE, GET_ALL_PERMISSIONS, ioctl_get_all_perm_data)
+#define	ACCESS_TOKENID_SET_USERID \
+	_IOW(ACCESS_TOKEN_ID_IOCTL_BASE, SET_USERID, uint32_t)
+#define	ACCESS_TOKENID_GET_USERID \
+	_IOR(ACCESS_TOKEN_ID_IOCTL_BASE, GET_USERID, uint32_t)
 
 #endif /* _ACCESS_TOKEN_ID_H */

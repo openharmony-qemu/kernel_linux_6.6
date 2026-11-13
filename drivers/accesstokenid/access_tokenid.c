@@ -15,6 +15,7 @@
 #include <linux/rwlock.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include "access_tokenid.h"
 
 DEFINE_RWLOCK(token_rwlock);
@@ -123,6 +124,26 @@ static bool check_permission_for_set_token_permission(void)
 {
 	kuid_t uid = current_uid();
 	return uid_eq(uid, ACCESS_TOKEN_UID) || uid_eq(uid, GLOBAL_ROOT_UID);
+}
+
+int access_tokenid_set_userid(struct file *file, void __user *uarg)
+{
+	uint32_t user_id;
+	/* nwebspawn sets its child's account before dropping to renderer uid.
+	 * This exception does not authorize token or permission bitmap writes.
+	 */
+	if (!check_permission_for_set_token_permission() && !uid_eq(current_uid(), NWEBSPAWN_UID))
+		return -EPERM;
+	if (copy_from_user(&user_id, uarg, sizeof(user_id)))
+		return -EFAULT;
+	current->user_id = user_id;
+	return 0;
+}
+
+int access_tokenid_get_userid(struct file *file, void __user *uarg)
+{
+	return copy_to_user(uarg, &current->user_id,
+			    sizeof(current->user_id)) ? -EFAULT : 0;
 }
 
 static void add_node_to_left_tree_tail(struct token_perm_node *root_node, struct token_perm_node *node)
@@ -302,14 +323,42 @@ int access_tokenid_get_permission(struct file *file, void __user *uarg)
 
 	struct token_perm_node *target_node = NULL;
 	struct token_perm_node *parent_node = NULL;
+	int granted;
 	read_lock(&token_rwlock);
 	find_node_by_token(g_token_perm_root, get_perm_data.token, &target_node, &parent_node);
-	read_unlock(&token_rwlock);
-	if (target_node == NULL)
+	if (target_node == NULL) {
+		read_unlock(&token_rwlock);
 		return -ENODATA;
+	}
 
 	uint32_t bit_idx = get_perm_data.op_code % UINT32_T_BITS;
-	return (target_node->perm_data.perm[idx] & ((uint32_t)0x01 << bit_idx)) >> bit_idx;
+	granted = (target_node->perm_data.perm[idx] & ((uint32_t)0x01 << bit_idx)) >> bit_idx;
+	read_unlock(&token_rwlock);
+	return granted;
+}
+
+int access_tokenid_get_all_permissions(struct file *file, void __user *uarg)
+{
+	ioctl_get_all_perm_data data = {0};
+	struct token_perm_node *target_node = NULL;
+	struct token_perm_node *parent_node = NULL;
+
+	if (copy_from_user(&data, uarg, sizeof(data)))
+		return -EFAULT;
+
+	read_lock(&token_rwlock);
+	find_node_by_token(g_token_perm_root, data.token, &target_node, &parent_node);
+	if (target_node == NULL) {
+		read_unlock(&token_rwlock);
+		return -ENODATA;
+	}
+	memcpy(data.perm, target_node->perm_data.perm, sizeof(data.perm));
+	read_unlock(&token_rwlock);
+
+	/* No userspace access under the spinlock; the node is never dereferenced
+	 * after unlocking, so concurrent remove/grant cannot cause a stale read.
+	 */
+	return copy_to_user(uarg, &data, sizeof(data)) ? -EFAULT : 0;
 }
 
 static long access_tokenid_ioctl(struct file *file, unsigned int cmd,
@@ -346,6 +395,15 @@ static long access_tokenid_ioctl(struct file *file, unsigned int cmd,
 			break;
 		case ACCESS_TOKENID_SET_PERMISSION:
 			ret = access_tokenid_set_permission(file, uarg);
+			break;
+		case ACCESS_TOKENID_GET_ALL_PERMISSIONS:
+			ret = access_tokenid_get_all_permissions(file, uarg);
+			break;
+		case ACCESS_TOKENID_SET_USERID:
+			ret = access_tokenid_set_userid(file, uarg);
+			break;
+		case ACCESS_TOKENID_GET_USERID:
+			ret = access_tokenid_get_userid(file, uarg);
 			break;
 		default:
 			pr_err("%s: access tokenid cmd error, cmd:%u\n", __func__, cmd);

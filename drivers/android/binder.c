@@ -1633,6 +1633,9 @@ static void binder_free_transaction(struct binder_transaction *t)
 	 * t->buffer->transaction has already been cleared.
 	 */
 	binder_free_txn_fixups(t);
+#ifdef CONFIG_BINDER_SENDER_INFO
+	put_pid(t->async_sender_pid);
+#endif
 	kfree(t);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 }
@@ -2869,6 +2872,9 @@ static int binder_proc_transaction(struct binder_transaction *t,
 		trace_binder_transaction_update_buffer_release(buffer);
 		binder_release_entire_buffer(proc, NULL, buffer, false);
 		binder_alloc_free_buf(&proc->alloc, buffer);
+#ifdef CONFIG_BINDER_SENDER_INFO
+		put_pid(t_outdated->async_sender_pid);
+#endif
 		kfree(t_outdated);
 		binder_stats_deleted(BINDER_STAT_TRANSACTION);
 	}
@@ -3242,6 +3248,10 @@ static void binder_transaction(struct binder_proc *proc,
 #endif
 	}
 
+#ifdef CONFIG_BINDER_SENDER_INFO
+	if (!reply && (tr->flags & TF_ONE_WAY))
+		t->async_sender_pid = get_task_pid(current, PIDTYPE_TGID);
+#endif
 	t->sender_euid = task_euid(proc->tsk);
 #ifdef CONFIG_ACCESS_TOKENID
 	t->sender_tokenid = current->token;
@@ -3758,6 +3768,9 @@ err_get_secctx_failed:
 err_alloc_tcomplete_failed:
 	if (trace_binder_txn_latency_free_enabled())
 		binder_txn_latency_free(t);
+#ifdef CONFIG_BINDER_SENDER_INFO
+	put_pid(t->async_sender_pid);
+#endif
 	kfree(t);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 err_alloc_t_failed:
@@ -4741,7 +4754,7 @@ retry:
 			trd->sender_pid = 0;
 #ifdef CONFIG_BINDER_SENDER_INFO
 			binder_inner_proc_lock(thread->proc);
-			thread->sender_pid_nr = 0;
+			thread->sender_pid_nr = pid_nr(t->async_sender_pid);
 			binder_inner_proc_unlock(thread->proc);
 #endif
 		}

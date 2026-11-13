@@ -1,0 +1,13 @@
+diff --git a/kernel/linux/linux-6.6/include/trace/events/mmflags.h b/kernel/linux/linux-6.6/include/trace/events/mmflags.h
+index 5078d1dfc..7f0b2e23d 100644
+--- a/kernel/linux/linux-6.6/include/trace/events/mmflags.h
++++ b/kernel/linux/linux-6.6/include/trace/events/mmflags.h
+@@ -132,6 +132,8 @@
+ 	DEF_PAGEFLAG_NAME(swapbacked),					\
+ 	DEF_PAGEFLAG_NAME(unevictable)					\
+ IF_HAVE_PG_PURGEABLE(purgeable)						\
++IF_HAVE_PG_XPM_INTEGRITY(xpm_readonly)					\
++IF_HAVE_PG_XPM_INTEGRITY(xpm_writetainted)				\
+ IF_HAVE_PG_MLOCK(mlocked)						\
+ IF_HAVE_PG_UNCACHED(uncached)						\
+ IF_HAVE_PG_HWPOISON(hwpoison)						\

@@ -500,9 +500,6 @@ As of kernel 2.6.22, the following members are defined:
 		int (*mknod) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
 		int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
 			       struct inode *, struct dentry *, unsigned int);
-		int (*rename_prepare)(struct dentry *, struct dentry *,
-				      unsigned int, void **);
-		void (*rename_finish)(void *, int);
 		int (*readlink) (struct dentry *, char __user *,int);
 		const char *(*get_link) (struct dentry *, struct inode *,
 					 struct delayed_call *);
@@ -521,6 +518,11 @@ As of kernel 2.6.22, the following members are defined:
 				    struct dentry *dentry, struct fileattr *fa);
 		int (*fileattr_get)(struct dentry *dentry, struct fileattr *fa);
 	        struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
+
+		/* OHOS extension: optional VFS rename hooks. */
+		int (*rename_prepare)(struct dentry *, struct dentry *,
+				      unsigned int, void **);
+		void (*rename_finish)(void *, int);
 	};
 
 Again, all methods are called without any locks being held, unless

@@ -654,7 +654,7 @@ int f2fs_monitor_set(struct file *file, unsigned long arg)
 	if (!S_ISDIR(inode->i_mode))
 		return -EINVAL;
 	mutex_lock(&monitor->config_lock);
-	if (unlikely(f2fs_cp_error(sbi))) {
+	if (arg && unlikely(f2fs_cp_error(sbi))) {
 		err = -EIO;
 		goto out_mutex;
 	}
@@ -762,13 +762,13 @@ out_mutex:
 int f2fs_monitor_get(struct file *file, unsigned long arg)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(file_inode(file));
-	u8 enabled;
+	u32 enabled;
 
 	down_read(&sbi->monitor->sem);
 	enabled = is_inode_flag_set(file_inode(file), FI_MONITORED) &&
 		  !!monitor_find_root(file->f_path.dentry);
 	up_read(&sbi->monitor->sem);
-	return put_user(enabled, (u8 __user *)arg);
+	return put_user(enabled, (u32 __user *)arg);
 }
 
 /* Report the latched error without clearing it; repeated SET cannot reset it. */

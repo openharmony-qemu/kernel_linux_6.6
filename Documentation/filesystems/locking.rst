@@ -66,9 +66,6 @@ prototypes::
 	int (*mknod) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
 	int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
 			struct inode *, struct dentry *, unsigned int);
-	int (*rename_prepare)(struct dentry *, struct dentry *, unsigned int,
-			      void **);
-	void (*rename_finish)(void *, int);
 	int (*readlink) (struct dentry *, char __user *,int);
 	const char *(*get_link) (struct dentry *, struct inode *, struct delayed_call *);
 	void (*truncate) (struct inode *);
@@ -89,6 +86,11 @@ prototypes::
 	int (*fileattr_get)(struct dentry *dentry, struct fileattr *fa);
 	struct posix_acl * (*get_acl)(struct mnt_idmap *, struct dentry *, int);
 	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
+
+	/* OHOS extension: optional VFS rename hooks. */
+	int (*rename_prepare)(struct dentry *, struct dentry *, unsigned int,
+			      void **);
+	void (*rename_finish)(void *, int);
 
 locking rules:
 	all may block

@@ -3,6 +3,7 @@
 #include <linux/hashtable.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
+#include <linux/rcupdate.h>
 #include <linux/refcount.h>
 
 #include "f2fs.h"
@@ -113,7 +114,6 @@ void f2fs_monitor_inherit(struct inode *dir, struct inode *inode)
 		clear_inode_flag(inode, FI_MONITORED);
 }
 
-/* rename_lock makes both ancestry and names stable while copying. No I/O. */
 static struct monitor_config *monitor_root(struct dentry *entry)
 {
 	for (;;) {
@@ -137,37 +137,41 @@ static struct monitor_config *monitor_find_root(struct dentry *entry)
 	return config;
 }
 
-/*
- * Build backwards; the returned length identifies the suffix at buffer's end.
- * Caller holds rename_lock across both paths of a rename record.
- */
 static int monitor_path(struct dentry *entry, struct monitor_config *config,
 			char *buffer, size_t size)
 {
 	char *end = buffer + size, *pos = end;
 	int err = -ENOENT;
 
+	lockdep_assert_held(&config->sbi->monitor->sem);
+	rcu_read_lock();
 	for (;;) {
-		struct inode *inode = d_inode(entry);
+		struct dentry *parent;
 		size_t len;
 
-		if (inode == config->root) {
+		spin_lock(&entry->d_lock);
+		if (d_inode(entry) == config->root) {
 			err = end - pos;
-			break;
+			goto out_unlock;
 		}
-		if (IS_ROOT(entry))
-			break;
+		parent = entry->d_parent;
+		if (parent == entry)
+			goto out_unlock;
 		len = entry->d_name.len;
 		if (len + (pos != end) > pos - buffer) {
 			err = -ENAMETOOLONG;
-			break;
+			goto out_unlock;
 		}
 		if (pos != end)
 			*--pos = '/';
 		pos -= len;
 		memcpy(pos, entry->d_name.name, len);
-		entry = entry->d_parent;
+		spin_unlock(&entry->d_lock);
+		entry = parent;
 	}
+out_unlock:
+	spin_unlock(&entry->d_lock);
+	rcu_read_unlock();
 	return err;
 }
 
@@ -189,11 +193,9 @@ retry:
 		monitor_error(config, -ENOMEM);
 		return NULL;
 	}
-	read_seqlock_excl(&rename_lock);
 	len = monitor_path(entry, config, buffer, size);
 	if (len >= 0 && old)
 		old_len = monitor_path(old, config, buffer + size, size);
-	read_sequnlock_excl(&rename_lock);
 	if ((len == -ENAMETOOLONG || old_len == -ENAMETOOLONG) &&
 	    size < U16_MAX) {
 		kvfree(buffer);

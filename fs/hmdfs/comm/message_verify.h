@@ -23,5 +23,7 @@ enum MESSAGE_LEN_JUDGE_TYPE {
 void hmdfs_message_verify_init(void);
 int hmdfs_message_verify(struct hmdfs_peer *con, struct hmdfs_head_cmd *head,
 			 void *data);
+int hmdfs_slice_desc_valid(const struct slice_descriptor *sdesc,
+			   size_t buf_len);
 
 #endif

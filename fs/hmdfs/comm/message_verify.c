@@ -388,6 +388,25 @@ static int verify_iterate_req(size_t msg_len, void *msg)
 	return 0;
 }
 
+int hmdfs_slice_desc_valid(const struct slice_descriptor *sdesc,
+			   size_t buf_len)
+{
+	if (buf_len < sizeof(*sdesc))
+		return -EINVAL;
+	if (le32_to_cpu(sdesc->content_size) != buf_len - sizeof(*sdesc))
+		return -EINVAL;
+	if (le32_to_cpu(sdesc->slice_size) == 0 ||
+	    le32_to_cpu(sdesc->slice_size) > HMDFS_PAGE_SIZE)
+		return -EINVAL;
+	if (le32_to_cpu(sdesc->content_size) > le32_to_cpu(sdesc->slice_size))
+		return -EINVAL;
+	if (le32_to_cpu(sdesc->num_slices) == 0 ||
+	    le32_to_cpu(sdesc->slice_sn) >= le32_to_cpu(sdesc->num_slices))
+		return -EINVAL;
+
+	return 0;
+}
+
 static int hmdfs_iterate_verify(int flag, size_t msg_len, void *msg)
 {
 	if (!msg || !msg_len)
@@ -396,7 +415,7 @@ static int hmdfs_iterate_verify(int flag, size_t msg_len, void *msg)
 	if (flag == C_REQUEST)
 		return verify_iterate_req(msg_len, msg);
 
-	return 0;
+	return hmdfs_slice_desc_valid(msg, msg_len);
 }
 
 static int verify_mkdir_req(size_t msg_len, void *msg)

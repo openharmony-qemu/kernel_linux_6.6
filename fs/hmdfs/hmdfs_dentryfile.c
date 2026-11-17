@@ -576,6 +576,14 @@ int read_dentry(struct hmdfs_sb_info *sbi, char *file_name,
 			if (!test_bit_le(j, dentry_group->bitmap) || len == 0)
 				continue;
 
+			if (!hmdfs_dentry_name_valid(len, j,
+						     DENTRY_PER_GROUP)) {
+				hmdfs_err_ratelimited(
+					"invalid dentry name len %d slot %d",
+					len, j);
+				continue;
+			}
+
 			if (S_ISDIR(le16_to_cpu(dentry_group->nsl[j].i_mode)))
 				file_type = DT_DIR;
 			else if (S_ISREG(le16_to_cpu(

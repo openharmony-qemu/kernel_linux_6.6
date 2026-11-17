@@ -9,6 +9,7 @@
 #define HMDFS_DENTRYFILE_H
 
 #include "hmdfs.h"
+#include <linux/limits.h>
 #include <linux/namei.h>
 
 /* use for escape from hmdfs file system, hmdfs hide follow names */
@@ -132,6 +133,12 @@ static inline unsigned int get_dentry_group_cnt(struct inode *inode)
 #define BITS_PER_BYTE	    8
 #define HMDFS_SLOT_LEN_BITS 3
 #define get_dentry_slots(x) (((x) + BITS_PER_BYTE - 1) >> HMDFS_SLOT_LEN_BITS)
+
+static inline bool hmdfs_dentry_name_valid(int len, int slot, int per_group)
+{
+	return (len > 0) && (len <= NAME_MAX) &&
+	       (slot + get_dentry_slots(len) <= per_group);
+}
 
 #define INUNUMBER_START 10000000
 

@@ -27,6 +27,7 @@
 #include <linux/iomap.h>
 
 #include "f2fs.h"
+#include "monitor.h"
 #include "node.h"
 #include "segment.h"
 #include "xattr.h"
@@ -1107,6 +1108,11 @@ int f2fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	/* inode change will produce dirty node pages flushed by checkpoint */
 	f2fs_balance_fs(F2FS_I_SB(inode), true);
 
+	if (!err)
+		f2fs_monitor_event(dentry, S_ISDIR(inode->i_mode) ?
+				   F2FS_D_MODIFY : F2FS_F_MODIFY,
+				   !(attr->ia_valid & ATTR_SIZE));
+
 	return err;
 }
 
@@ -1958,6 +1964,8 @@ out:
 
 static int f2fs_release_file(struct inode *inode, struct file *filp)
 {
+	f2fs_monitor_close(filp);
+
 	/*
 	 * f2fs_release_file is called at every close calls. So we should
 	 * not drop any inmemory pages by close called by other process.
@@ -4530,6 +4538,15 @@ static long __f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 long f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
+	switch (cmd) {
+	case F2FS_IOC_SET_MONITOR:
+		return f2fs_monitor_set(filp, arg);
+	case F2FS_IOC_GET_MONITOR:
+		return f2fs_monitor_get(filp, arg);
+	case F2FS_IOC_GET_MONITOR_ERROR:
+		return f2fs_monitor_get_error(filp, arg);
+	}
+
 	if (unlikely(f2fs_cp_error(F2FS_I_SB(file_inode(filp)))))
 		return -EIO;
 	if (!f2fs_is_checkpoint_ready(F2FS_I_SB(file_inode(filp))))
@@ -4910,7 +4927,8 @@ static ssize_t f2fs_dio_write_iter(struct kiocb *iocb, struct iov_iter *from,
 	 */
 	inc_page_count(sbi, F2FS_DIO_WRITE);
 	dio_flags = 0;
-	if (pos + count > inode->i_size)
+	if (pos + count > inode->i_size ||
+	    is_inode_flag_set(inode, FI_MONITORED))
 		dio_flags |= IOMAP_DIO_FORCE_WAIT;
 	dio = __iomap_dio_rw(iocb, from, &f2fs_iomap_ops,
 			     &f2fs_iomap_dio_write_ops, dio_flags, NULL, 0);
@@ -5017,6 +5035,16 @@ static ssize_t f2fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	/* Determine whether we will do a direct write or a buffered write. */
 	dio = f2fs_should_use_dio(inode, iocb, from);
 
+	/*
+	 * Monitored DIO must complete before updating monitor state.
+	 * NOWAIT callers must retry without NOWAIT to allow that wait.
+	 */
+	if (dio && (iocb->ki_flags & IOCB_NOWAIT) &&
+	    is_inode_flag_set(inode, FI_MONITORED)) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
+
 	/* Possibly preallocate the blocks for the write. */
 	target_size = iocb->ki_pos + iov_iter_count(from);
 	preallocated = f2fs_preallocate_blocks(iocb, from, dio);
@@ -5049,6 +5077,8 @@ static ssize_t f2fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	}
 
 	clear_inode_flag(inode, FI_PREALLOCATED_ALL);
+	if (ret > 0)
+		f2fs_monitor_written(iocb->ki_filp);
 out_unlock:
 	inode_unlock(inode);
 out:
@@ -5155,6 +5185,16 @@ static int f2fs_compat_ioc_move_range(struct file *file, unsigned long arg)
 
 long f2fs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	switch (cmd) {
+	case F2FS_IOC_SET_MONITOR:
+		/* SET uses the immediate argument, including for 32-bit callers. */
+		return f2fs_monitor_set(file, arg);
+	case F2FS_IOC_GET_MONITOR:
+		return f2fs_monitor_get(file, (unsigned long)compat_ptr(arg));
+	case F2FS_IOC_GET_MONITOR_ERROR:
+		return f2fs_monitor_get_error(file, (unsigned long)compat_ptr(arg));
+	}
+
 	if (unlikely(f2fs_cp_error(F2FS_I_SB(file_inode(file)))))
 		return -EIO;
 	if (!f2fs_is_checkpoint_ready(F2FS_I_SB(file_inode(file))))
@@ -5216,6 +5256,7 @@ long f2fs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 }
 #endif
 
+/* file->private_data is reserved by monitoring; see monitor.h. */
 const struct file_operations f2fs_file_operations = {
 	.llseek		= f2fs_llseek,
 	.read_iter	= f2fs_file_read_iter,

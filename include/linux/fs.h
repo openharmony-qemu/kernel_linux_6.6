@@ -2004,6 +2004,14 @@ struct inode_operations {
 			    struct dentry *dentry, struct fileattr *fa);
 	int (*fileattr_get)(struct dentry *dentry, struct fileattr *fa);
 	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
+
+	/*
+	 * OHOS extension: optional hooks around ->rename() and the VFS dcache
+	 * update. Keep these members last to ease upstream merges.
+	 */
+	int (*rename_prepare)(struct dentry *, struct dentry *, unsigned int,
+			      void **);
+	void (*rename_finish)(void *, int);
 } ____cacheline_aligned;
 
 static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,

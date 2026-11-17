@@ -87,6 +87,11 @@ prototypes::
 	struct posix_acl * (*get_acl)(struct mnt_idmap *, struct dentry *, int);
 	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
 
+	/* OHOS extension: optional VFS rename hooks. */
+	int (*rename_prepare)(struct dentry *, struct dentry *, unsigned int,
+			      void **);
+	void (*rename_finish)(void *, int);
+
 locking rules:
 	all may block
 
@@ -102,6 +107,8 @@ mkdir:		exclusive
 unlink:		exclusive (both)
 rmdir:		exclusive (both)(see below)
 rename:		exclusive (both parents, some children)	(see below)
+rename_prepare	exclusive (same as rename)
+rename_finish	exclusive (same as rename)
 readlink:	no
 get_link:	no
 setattr:	exclusive
@@ -126,6 +133,11 @@ get_offset_ctx  no
 	->unlink() and ->rename() have ->i_rwsem exclusive on all non-directories
 	involved.
 	->rename() has ->i_rwsem exclusive on any subdirectory that changes parent.
+
+The optional ->rename_prepare() and ->rename_finish() methods run with the
+same locks as ->rename().  The finish method runs after the dcache update on
+success, or after ->rename() returns an error.  It is not called if preparation
+fails.  Neither method is entered with the dcache rename_lock held.
 
 See Documentation/filesystems/directory-locking.rst for more detailed discussion
 of the locking scheme for directory operations.

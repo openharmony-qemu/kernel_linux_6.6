@@ -346,14 +346,22 @@ int analysis_dentry_file_from_cloud(struct hmdfs_sb_info *sbi,
 			if (!test_bit_le(j, dentry_group->bitmap) || len == 0)
 				continue;
 
-			memset(dentry_name, 0, DENTRY_NAME_MAX_LEN);
+			if (!hmdfs_dentry_name_valid(len, j,
+						     DENTRY_PER_GROUP_CLOUD)) {
+				hmdfs_err_ratelimited(
+					"invalid dentry name len %d slot %d",
+					len, j);
+				continue;
+			}
+
 			if (S_ISDIR(le16_to_cpu(dentry_group->nsl[j].i_mode)))
 				file_type = DT_DIR;
 			else if (S_ISREG(le16_to_cpu(
 					 dentry_group->nsl[j].i_mode)))
 				file_type = DT_REG;
 
-			strncat(dentry_name, dentry_group->filename[j], len);
+			memcpy(dentry_name, dentry_group->filename[j], len);
+			dentry_name[len] = '\0';
 			pos = hmdfs_set_pos(dev_id, i, j);
 			is_continue =
 				dir_emit(ctx, dentry_name, len,

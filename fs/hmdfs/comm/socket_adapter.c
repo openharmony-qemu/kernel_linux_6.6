@@ -876,7 +876,9 @@ static int hmdfs_readfile_slice(struct sendmsg_wait_queue *msg_info,
 				struct work_handler_desp *desp)
 {
 	struct slice_descriptor *sdesc = desp->buf;
-	void *slice_buf = sdesc + 1;
+	__u32 data_len = le32_to_cpu(desp->head->data_len);
+	size_t buf_len;
+	void *slice_buf;
 	struct file_recv_info *recv_info = &msg_info->recv_info;
 	struct file *filp = recv_info->local_filp;
 	loff_t offset;
@@ -887,10 +889,25 @@ static int hmdfs_readfile_slice(struct sendmsg_wait_queue *msg_info,
 		return -EINVAL;
 	}
 
+	if (data_len < sizeof(struct hmdfs_head_cmd)) {
+		hmdfs_err_ratelimited("invalid slice msg data_len %u",
+				      data_len);
+		return -EINVAL;
+	}
+
+	buf_len = data_len - sizeof(struct hmdfs_head_cmd);
+	if (hmdfs_slice_desc_valid(sdesc, buf_len)) {
+		hmdfs_err_ratelimited("invalid file slice descriptor, buf_len = %zu",
+				      buf_len);
+		return -EINVAL;
+	}
+
 	if (atomic_read(&recv_info->state) != FILE_RECV_PROCESS)
 		return -EBUSY;
 
-	offset = le32_to_cpu(sdesc->slice_size) * le32_to_cpu(sdesc->slice_sn);
+	slice_buf = sdesc + 1;
+	offset = (loff_t)le32_to_cpu(sdesc->slice_sn) *
+		 le32_to_cpu(sdesc->slice_size);
 
 	written_size = kernel_write(filp, slice_buf,
 				    le32_to_cpu(sdesc->content_size), &offset);

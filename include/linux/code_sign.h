@@ -76,6 +76,7 @@ static inline int code_sign_check_descriptor_hook(const struct inode *inode, con
 	return ret;
 }
 
+#if defined(CONFIG_HCK)
 static inline int code_sign_before_measurement_hook(void *desc)
 {
 	int ret = 0;
@@ -83,10 +84,42 @@ static inline int code_sign_before_measurement_hook(void *desc)
 	CALL_HCK_LITE_HOOK(code_sign_before_measurement_lhck, desc, &ret);
 	return ret;
 }
+#elif defined(CONFIG_SECURITY_CODE_SIGN)
+/* Implemented in common_modules/code_sign (fs/code_sign in build tree).
+ * CONFIG_SECURITY_CODE_SIGN is only set when common_modules is applied,
+ * so the symbols are guaranteed to exist at link time. */
+extern void code_sign_before_measurement(void *desc, int *ret);
 
+static inline int code_sign_before_measurement_hook(void *desc)
+{
+	int ret = 0;
+
+	code_sign_before_measurement(desc, &ret);
+	return ret;
+}
+#else
+static inline int code_sign_before_measurement_hook(void *desc)
+{
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_HCK)
 static inline void code_sign_after_measurement_hook(void *desc, int version)
 {
 	CALL_HCK_LITE_HOOK(code_sign_after_measurement_lhck, desc, version);
 }
+#elif defined(CONFIG_SECURITY_CODE_SIGN)
+extern void code_sign_after_measurement(void *desc, int version);
+
+static inline void code_sign_after_measurement_hook(void *desc, int version)
+{
+	code_sign_after_measurement(desc, version);
+}
+#else
+static inline void code_sign_after_measurement_hook(void *desc, int version)
+{
+}
+#endif
 
 #endif /* LINUX_INCLUDE_CODE_SIGN_H */

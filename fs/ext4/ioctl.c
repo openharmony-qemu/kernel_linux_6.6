@@ -1592,6 +1592,11 @@ resizefs_out:
 			return -EOPNOTSUPP;
 		return fsverity_ioctl_enable(filp, (const void __user *)arg);
 
+	case FS_IOC_ENABLE_CODE_SIGN:
+		if (!ext4_has_feature_verity(sb))
+			return -EOPNOTSUPP;
+		return fsverity_ioctl_enable_code_sign(filp, (const void __user *)arg);
+
 	case FS_IOC_MEASURE_VERITY:
 		if (!ext4_has_feature_verity(sb))
 			return -EOPNOTSUPP;
@@ -1686,6 +1691,7 @@ long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case EXT4_IOC_SHUTDOWN:
 	case FS_IOC_GETFSMAP:
 	case FS_IOC_ENABLE_VERITY:
+	case FS_IOC_ENABLE_CODE_SIGN:
 	case FS_IOC_MEASURE_VERITY:
 	case FS_IOC_READ_VERITY_METADATA:
 	case EXT4_IOC_CLEAR_ES_CACHE:

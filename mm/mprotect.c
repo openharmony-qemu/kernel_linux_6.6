@@ -583,7 +583,7 @@ mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
 	unsigned int mm_cp_flags = 0;
 	unsigned long charged = 0;
 	pgoff_t pgoff;
-	int error;
+	int error = 0;
 
 	if (newflags == oldflags) {
 		*pprev = vma;
@@ -693,7 +693,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 {
 	unsigned long nstart, end, tmp, reqprot;
 	struct vm_area_struct *vma, *prev;
-	int error;
+	int error = 0;
 	const int grows = prot & (PROT_GROWSDOWN|PROT_GROWSUP);
 	const bool rier = (current->personality & READ_IMPLIES_EXEC) &&
 				(prot & PROT_READ);

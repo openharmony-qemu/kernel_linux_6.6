@@ -62,7 +62,10 @@ struct ffs_memory{
   uint64_t vm_start;
   uint32_t size;
   struct list_head memlist;
+  struct fg_page_info *pinfo;   /* reverse ref to pinfo, RELEASE_BUF clears pinfo->ffsm */
 };
+
+struct fg_page_info;
 
 struct generic_memory{
   uint32_t size;
@@ -197,6 +200,8 @@ struct ffs_data {
 	struct usb_gadget		*gadget;
 	struct list_head         entry;
 	struct list_head         memory_list;
+	/* Tracking in-flight async io requests on ep0 (protected by eps_lock) */
+	struct list_head         async_list;
 	/*
 	 * Protect access read/write operations, only one read/write
 	 * at a time.  As a consequence protects ep0req and company.
